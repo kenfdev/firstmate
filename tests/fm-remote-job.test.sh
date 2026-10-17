@@ -252,6 +252,24 @@ if [ -n "$IDENTITY_LOCALE" ]; then
   pass "lock and claim owner identity stays locale-invariant ($IDENTITY_LOCALE)"
 fi
 
+# ps lstart re-renders from the wall clock, which WSL2 steps under a live
+# process, so a worker stopped matching its own lock record and dropped its
+# heartbeat. Where /proc exists the start identity must come from stat field
+# 22, which never moves, even when comm holds spaces and parentheses.
+FAKE_PROC="$TMP_ROOT/fake-proc"
+mkdir -p "$FAKE_PROC/4242" "$FAKE_PROC/4343"
+printf '4242 (odd) name (x) S 1 4242 4242 0 -1 4194304 1 0 0 0 0 0 0 0 20 0 1 0 987654 1000 10 18446744073709551615\n' > "$FAKE_PROC/4242/stat"
+printf '4343 (short) S 1 4343\n' > "$FAKE_PROC/4343/stat"
+PROC_START=$(FM_PROC_ROOT_OVERRIDE="$FAKE_PROC" fm_remote_job_process_start 4242) \
+  || fail "the process start identity was unreadable from a valid /proc stat"
+[ "$PROC_START" = "proc-starttime=987654" ] \
+  || fail "the process start identity did not come from /proc stat field 22: $PROC_START"
+if FM_PROC_ROOT_OVERRIDE="$FAKE_PROC" fm_remote_job_process_start 4343 >/dev/null 2>&1; then
+  fail "a truncated /proc stat produced a process start identity"
+fi
+rm -rf -- "$FAKE_PROC"
+pass "process start identity uses the clock-independent /proc starttime when available"
+
 LOCAL_BIN_PARENT="$ACCOUNT_HOME/.local"
 LOCAL_BIN_TARGET="$TMP_ROOT/local-bin-target"
 mkdir -p "$LOCAL_BIN_PARENT" "$LOCAL_BIN_TARGET"

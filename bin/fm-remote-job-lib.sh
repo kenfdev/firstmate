@@ -968,12 +968,27 @@ fm_remote_job_worker_ready_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.r
 fm_remote_job_worker_identity_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.identity"; }
 fm_remote_job_worker_lock_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.lock"; }
 
-# Pin LC_ALL=C so lstart's date format is locale-invariant: a lock or claim
-# owner recorded under one locale (de_DE renders "Fr. 16 Okt. ...") must still
-# verify under another, or the checker declares the live owner dead and a
+# Prefer a Linux-compatible /proc when present: stat field 22 (starttime, clock
+# ticks since boot) never moves, while ps lstart re-renders from the wall clock
+# and drifts on WSL2, so a live lock owner would otherwise stop matching its own
+# record and lose its heartbeat (mirrors fm_pid_identity in bin/fm-wake-lib.sh).
+# Otherwise pin LC_ALL=C so lstart's date format is locale-invariant: a lock or
+# claim owner recorded under one locale (de_DE renders "Fr. 16 Okt. ...") must
+# still verify under another, or the checker declares the live owner dead and a
 # second worker splits the queue.
 fm_remote_job_process_start() {
-  local pid=$1 ps_bin value
+  local pid=$1 ps_bin value proc_root stat_line
+  local -a stat_fields
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  if [ -r "$proc_root/$pid/stat" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    # After the final comm delimiter, array index 19 is proc stat field 22.
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    case "${stat_fields[19]}" in ''|*[!0-9]*) return 1 ;; esac
+    printf 'proc-starttime=%s\n' "${stat_fields[19]}"
+    return 0
+  fi
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
   value=$(LC_ALL=C "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ -n "$value" ] || return 1
