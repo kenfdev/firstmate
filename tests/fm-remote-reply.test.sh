@@ -122,6 +122,177 @@ sha256_file() {
   fi
 }
 
+# Receipt identity is independent of a reusable inbox slot. Exercise the public
+# capture library and handler with real reader output, without starting a runner
+# or contacting a remote host. Archived captures and receipts remain evidence.
+receipt_identity_cases() (
+  set -e
+  local home="$TMP_ROOT/receipt-identity" source_home result one two offset hash out legacy qualified original real_mktemp
+  local adapter="$ROOT/bin/fm-procevent-remote-reply.sh" sid=remote-reply-ios
+  source_home="$home/remote"
+  mkdir -p "$home/data" "$home/state" "$home/claims" "$home/archive" "$source_home/state"
+  printf -- '- ios - fixture (host: offline; root: %s; home: %s; scope: fixture; projects: alpha; added 2026-10-18)\n' \
+    "$ROOT" "$source_home" > "$home/data/secondmates.md"
+  export FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data"
+  export FM_PROCEVENT_CLAIM_ROOT="$home/claims" FM_SSH_BIN=/bin/false
+  # shellcheck source=bin/fm-pr-lib.sh
+  . "$ROOT/bin/fm-pr-lib.sh"
+  # shellcheck source=bin/fm-procevent-lib.sh
+  . "$ROOT/bin/fm-procevent-lib.sh"
+  # fm-wake-lib is required by the public capture API.
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$ROOT/bin/fm-wake-lib.sh"
+  : > "$source_home/state/parent-replies.status"
+  hash=$(sha256_file "$source_home/state/parent-replies.status")
+  printf 'working: historical receipt\n' > "$source_home/state/parent-replies.status"
+  FM_HOME="$source_home" bash "$ROOT/bin/fm-remote-delta-read.sh" \
+    state/parent-replies.status 0 "$hash" 1 > "$home/one"
+  one=$(fm_procevent_capture "$home/state" "$sid" remote-reply "$home/one")
+  bash "$adapter" handle ios 1 "$one" > "$home/handle-one"
+  assert_grep 'working: historical receipt' "$home/state/ios.status" "initial handler did not mirror the reply"
+  # Seed the on-disk legacy format, as an upgrade from the old handler leaves it.
+  legacy="$home/state/remote-replies/ios.1.ingested"
+  printf 'result_sha256=%s\n' "$(sha256_file "$one")" > "$legacy"
+  cp "$legacy" "$home/archive/legacy"
+  qualified="$home/state/remote-replies/ios.sha256-$(sha256_file "$one").ingested"
+  # A legacy-only home must still replay, not just one already holding both formats.
+  if [ -f "$qualified" ]; then mv "$qualified" "$home/archive/qualified-one"; fi
+  cp "$home/state/ios.status" "$home/archive/status-one"
+  bash "$ROOT/bin/fm-procevent.sh" retire "$sid" >/dev/null
+  bash "$adapter" arm ios >/dev/null
+  # Ordinary retirement/re-registration cannot reset numbering while captures
+  # remain; retain a second slot for the mismatched-caller check below.
+  two=$(fm_procevent_capture "$home/state" "$sid" remote-reply "$home/one")
+  [ "$two" = "$home/state/procevent-inbox/$sid.2.result" ] || fail "re-registration reused a retained capture"
+  out=$(bash "$adapter" handle ios 1 "$one")
+  assert_contains "$out" 'appended=0' "legacy receipt was not replayable"
+  cmp -s "$home/archive/status-one" "$home/state/ios.status" || fail "legacy replay appended twice"
+  assert_present "$qualified" "legacy replay did not record its proven digest in the new receipt namespace"
+  cmp -s "$home/archive/legacy" "$legacy" || fail "legacy replay modified its original receipt"
+  pass "retirement and re-registration retain capture numbering and legacy receipt replay"
+
+  offset=$(wc -c < "$source_home/state/parent-replies.status" | tr -d ' ')
+  hash=$(sha256_file "$source_home/state/parent-replies.status")
+  printf 'done: new generation sharing the old number\n' >> "$source_home/state/parent-replies.status"
+  FM_HOME="$source_home" bash "$ROOT/bin/fm-remote-delta-read.sh" \
+    state/parent-replies.status "$offset" "$hash" 1 > "$home/two"
+  # The allocator chooses the first missing result, not a durable generation.
+  # Move, do not delete, the old slot's complete records to expose the mismatch.
+  mv "$one" "${one%.result}.adapter" "${one%.result}.handled" "$home/archive/"
+  result=$(fm_procevent_capture "$home/state" "$sid" remote-reply "$home/two")
+  [ "$result" = "$one" ] || fail "fixture did not reproduce capture-number reuse"
+  cp "$home/state/remote-replies/ios.cursor" "$home/archive/cursor-one"
+  # A different legacy digest is not permission to bypass payload or cursor checks.
+  printf 'corrupt payload\n' >> "$result"
+  if bash "$adapter" handle ios 1 "$result" > "$home/bad-payload.out" 2>&1; then
+    fail "receipt collision bypassed payload verification"
+  fi
+  assert_absent "${result%.result}.handled" "bad payload was acknowledged"
+  cmp -s "$home/archive/cursor-one" "$home/state/remote-replies/ios.cursor" || fail "bad payload moved the cursor"
+  cmp -s "$home/archive/status-one" "$home/state/ios.status" || fail "bad payload changed status history"
+  cp "$home/two" "$result"
+  sed 's/^from_prefix_sha256=.*/from_prefix_sha256=0000000000000000000000000000000000000000000000000000000000000000/' \
+    "$home/two" > "$result"
+  if bash "$adapter" handle ios 1 "$result" > "$home/bad-prefix.out" 2>&1; then
+    fail "receipt collision bypassed cursor prefix verification"
+  fi
+  assert_absent "${result%.result}.handled" "bad prefix was acknowledged"
+  cmp -s "$home/archive/cursor-one" "$home/state/remote-replies/ios.cursor" || fail "bad prefix moved the cursor"
+  cmp -s "$home/archive/status-one" "$home/state/ios.status" || fail "bad prefix changed status history"
+  cp "$home/two" "$result"
+  pass "a colliding legacy receipt cannot bypass payload integrity or starting-prefix validation"
+
+  # Stop after the real receipt commit but before the cursor commit. A retry
+  # must finish that cursor, not skip ingestion and leave the stream behind.
+  mkdir "$home/fail-bin"
+  real_mktemp=$(command -v mktemp)
+  {
+    cat <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in */.cursor.XXXXXX) exit 73 ;; esac
+SH
+    printf 'exec %q "$@"\n' "$real_mktemp"
+  } > "$home/fail-bin/mktemp"
+  chmod +x "$home/fail-bin/mktemp"
+  if PATH="$home/fail-bin:$PATH" bash "$adapter" handle ios 1 "$result" > "$home/cursor-failed.out" 2>&1; then
+    fail "cursor failure was reported as successful handling"
+  fi
+  qualified="$home/state/remote-replies/ios.sha256-$(sha256_file "$result").ingested"
+  assert_present "$qualified" "cursor failure occurred before the receipt committed"
+  assert_absent "${result%.result}.handled" "cursor failure acknowledged the result"
+  cmp -s "$home/archive/cursor-one" "$home/state/remote-replies/ios.cursor" || fail "failed cursor write changed the cursor"
+  if ! bash "$adapter" autohandle "$sid" 1 "$result" > "$home/collision.out" 2>&1; then
+    cat "$home/collision.out" >&2
+    fail "a new cursor-continuing capture collided with the preserved legacy receipt"
+  fi
+  assert_grep 'done: new generation sharing the old number' "$home/state/ios.status" "collision lost the new reply"
+  cmp -s "$legacy" "$home/archive/legacy" || fail "collision rewrote the historical receipt"
+  cmp -s "$result" "$home/two" || fail "collision rewrote the captured result"
+  assert_present "${result%.result}.handled" "collision was not acknowledged after ingestion"
+  qualified="$home/state/remote-replies/ios.sha256-$(sha256_file "$result").ingested"
+  assert_present "$qualified" "collision has no content-qualified receipt"
+  cp "$home/state/ios.status" "$home/archive/status-two"
+  out=$(bash "$adapter" handle ios 1 "$result")
+  assert_contains "$out" 'appended=0' "new-generation replay was not idempotent"
+  cmp -s "$home/archive/status-two" "$home/state/ios.status" || fail "new-generation replay appended twice"
+  assert_grep "offset=$(wc -c < "$source_home/state/parent-replies.status" | tr -d ' ')" \
+    "$home/state/remote-replies/ios.cursor" "receipt replay did not finish the interrupted cursor commit"
+  [ "$(grep -cF 'done: new generation sharing the old number' "$home/state/ios.status")" -eq 1 ] \
+    || fail "receipt replay duplicated the reply after the interrupted cursor commit"
+  pass "first-free capture-number reuse and cursor-commit recovery ingest once without replacing historical receipts"
+
+  # A mismatched caller must not ingest one result and acknowledge another.
+  cp "$home/state/remote-replies/ios.cursor" "$home/archive/cursor-two"
+  if bash "$adapter" handle ios 2 "$result" > "$home/wrong-slot.out" 2>&1; then
+    fail "handler acknowledged a different capture slot"
+  fi
+  assert_absent "${two%.result}.handled" "mismatched caller acknowledged the wrong capture"
+  cmp -s "$home/archive/cursor-two" "$home/state/remote-replies/ios.cursor" || fail "wrong-slot call moved the cursor"
+  # The same previously ingested bytes in another captured slot are a replay,
+  # even after a later delta advanced the cursor.
+  out=$(bash "$adapter" handle ios 2 "$two")
+  assert_contains "$out" 'appended=0' "same-content replay under another sequence was not recognized"
+  cmp -s "$home/archive/cursor-two" "$home/state/remote-replies/ios.cursor" || fail "earlier receipt rewound the cursor"
+  cmp -s "$home/archive/status-two" "$home/state/ios.status" || fail "another sequence duplicated historical status"
+
+  # Tampering with a content-qualified receipt is not a new generation.
+  original=$(cat "$qualified")
+  printf 'result_sha256=%064d\n' 0 > "$qualified"
+  cp "$qualified" "$home/archive/conflicting-receipt"
+  if bash "$adapter" handle ios 1 "$result" > "$home/bad-receipt.out" 2>&1; then
+    fail "handler trusted a genuinely conflicting qualified receipt"
+  fi
+  cmp -s "$qualified" "$home/archive/conflicting-receipt" || fail "handler replaced a conflicting qualified receipt"
+  printf '%s\n' "$original" > "$qualified"
+  printf 'result_sha256=invalid\n' > "$legacy"
+  if bash "$adapter" handle ios 1 "$result" > "$home/bad-legacy.out" 2>&1; then
+    fail "handler ignored a malformed legacy receipt"
+  fi
+  cp "$home/archive/legacy" "$legacy"
+  pass "mismatched capture arguments and malformed or conflicting receipts remain refused and preserved"
+
+  # A valid different delta from an already-consumed prefix is NOT forward
+  # progress. Make the whole log a new capture at slot 1, retaining both receipts.
+  mkdir "$home/archive/new"
+  mv "$result" "${result%.result}.adapter" "${result%.result}.handled" "$home/archive/new/"
+  : > "$home/empty"
+  FM_HOME="$source_home" bash "$ROOT/bin/fm-remote-delta-read.sh" \
+    state/parent-replies.status 0 "$(sha256_file "$home/empty")" 1 > "$home/overlap"
+  result=$(fm_procevent_capture "$home/state" "$sid" remote-reply "$home/overlap")
+  if bash "$adapter" handle ios 1 "$result" > "$home/overlap.out" 2>&1; then
+    fail "conflicting generation at an already-consumed cursor was accepted"
+  fi
+  assert_absent "${result%.result}.handled" "conflicting generation was acknowledged"
+  cmp -s "$home/archive/cursor-two" "$home/state/remote-replies/ios.cursor" || fail "conflicting generation moved the cursor"
+  cmp -s "$home/archive/status-two" "$home/state/ios.status" || fail "conflicting generation changed status history"
+  cmp -s "$home/archive/legacy" "$legacy" || fail "conflicting generation changed legacy evidence"
+  cmp -s "$home/overlap" "$result" || fail "conflicting generation changed capture evidence"
+  pass "valid but overlapping unreceipted generations cannot bypass cursor continuity"
+)
+receipt_identity_cases
+receipt_cases_rc=$?
+[ "$receipt_cases_rc" -eq 0 ] || exit "$receipt_cases_rc"
+
 # Drive the real delta-reader executable across its unchanged-file wait.
 # The recording sleep appends a complete line after the initial empty snapshot,
 # so the next snapshot must deliver it without consuming or modifying the log.

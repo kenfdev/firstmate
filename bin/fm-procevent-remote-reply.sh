@@ -67,6 +67,20 @@
 #     bin/fm-pending-reply-lib.sh, because a report that exists remotely but has
 #     not been mirrored yet must not be mistaken for a report the mate never
 #     wrote (see WINDOW_CLOSED_EMPTY below)
+# Ingestion receipts bind the secondmate and full result SHA-256 at
+# state/remote-replies/<id>.sha256-<sha256>.ingested. A sequence is
+# an inbox slot, not a lifetime identity: capture chooses the first missing
+# result, so archiving captures can reuse it while older receipts survive.
+# Handling preserves legacy <id>.<sequence>.ingested receipts and allows replay
+# only for their exact digest, which is then recorded in the new namespace too.
+# A different digest must pass full ingestion
+# validation and start at the current cursor; an end-cursor match alone is not
+# proof of ingestion. Malformed receipts and contradictory content-qualified
+# receipts still refuse handling. No receipt or capture is replaced on collision.
+# `handle` also verifies the supplied bytes against the canonical captured slot
+# and adapter before any effect, so it cannot ingest one reply and acknowledge
+# another. Receipt-before-cursor crash recovery completes the cursor only when
+# it still matches that exact result's starting position, never rewinding it.
 # Line framing and size bounding belong to bin/fm-remote-delta-read.sh, which
 # delivers only whole lines and breaks continuity on an over-long one.
 set -u
@@ -97,7 +111,7 @@ DOCUMENT_LOCAL_FAILURE=2
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,85p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -127,7 +141,9 @@ source_id() {
 }
 
 cursor_path() { printf '%s/%s.cursor\n' "$CURSOR_DIR" "$1"; }
-ingest_receipt_path() { printf '%s/%s.%s.ingested\n' "$CURSOR_DIR" "$1" "$2"; }
+ingest_receipt_path() { # <id> <legacy-sequence> [<result-sha256>]
+  printf '%s/%s.%s.ingested\n' "$CURSOR_DIR" "$1" "${3:+sha256-}${3:-$2}"
+}
 retirement_count_path() { printf '%s/%s.retirements\n' "$CURSOR_DIR" "$1"; }
 mirrored_source_path() { printf '%s/.remote-reply-mirrored-%s\n' "$STATE" "$1"; }
 
@@ -202,30 +218,41 @@ continuity_prefix() {
   printf '%.12s' "$CURSOR_HASH"
 }
 
-ingest_receipt_matches() { # <id> <sequence> <result>
-  local path stored actual count
-  path=$(ingest_receipt_path "$1" "$2")
+read_ingest_receipt() { # <path>; sets INGEST_RECEIPT_HASH
+  local path=$1 count
   [ -e "$path" ] || [ -L "$path" ] || return 1
   [ -f "$path" ] && [ ! -L "$path" ] || die "remote reply ingestion receipt is unsafe: $path"
   count=$(grep -c '^result_sha256=' "$path" 2>/dev/null || true)
   [ "$count" -eq 1 ] || die "remote reply ingestion receipt is malformed: $path"
-  stored=$(sed -n 's/^result_sha256=//p' "$path")
-  case "$stored" in *[!A-Fa-f0-9]*|'') die "remote reply ingestion receipt is malformed: $path" ;; esac
-  [ "${#stored}" -eq 64 ] || die "remote reply ingestion receipt is malformed: $path"
+  INGEST_RECEIPT_HASH=$(sed -n 's/^result_sha256=//p' "$path")
+  case "$INGEST_RECEIPT_HASH" in *[!A-Fa-f0-9]*|'') die "remote reply ingestion receipt is malformed: $path" ;; esac
+  [ "${#INGEST_RECEIPT_HASH}" -eq 64 ] || die "remote reply ingestion receipt is malformed: $path"
+  INGEST_RECEIPT_HASH=$(printf '%s' "$INGEST_RECEIPT_HASH" | tr 'A-F' 'a-f')
+}
+
+ingest_receipt_matches() { # <id> <sequence> <result>
+  local actual matched=1
   actual=$(sha256_file "$3") || die "cannot hash remote reply result"
-  [ "$stored" = "$actual" ] || die "remote reply generation conflicts with its ingestion receipt"
+  if read_ingest_receipt "$(ingest_receipt_path "$1" "$2")"; then
+    [ "$INGEST_RECEIPT_HASH" != "$actual" ] || matched=0
+  fi
+  if read_ingest_receipt "$(ingest_receipt_path "$1" "$2" "$actual")"; then
+    [ "$INGEST_RECEIPT_HASH" = "$actual" ] || die "remote reply generation conflicts with its ingestion receipt"
+    matched=0
+  fi
+  return "$matched"
 }
 
 write_ingest_receipt() { # <id> <sequence> <result>
   local id=$1 seq=$2 result=$3 path tmp hash
   mkdir -p "$CURSOR_DIR" || return 1
   chmod 700 "$CURSOR_DIR" 2>/dev/null || true
-  path=$(ingest_receipt_path "$id" "$seq")
-  if [ -e "$path" ] || [ -L "$path" ]; then
-    ingest_receipt_matches "$id" "$seq" "$result"
-    return $?
-  fi
   hash=$(sha256_file "$result") || return 1
+  path=$(ingest_receipt_path "$id" "$seq" "$hash")
+  if read_ingest_receipt "$path"; then
+    [ "$INGEST_RECEIPT_HASH" = "$hash" ] || die "remote reply generation conflicts with its ingestion receipt"
+    return 0
+  fi
   tmp=$(umask 077; mktemp "$CURSOR_DIR/.ingested.XXXXXX") || return 1
   printf 'result_sha256=%s\n' "$hash" > "$tmp" \
     || { rm -f -- "$tmp"; return 1; }
@@ -576,7 +603,7 @@ cmd_ingest() {
   chmod 600 "$source_record" \
     || { fm_lock_release "$lock"; die "cannot secure remote reply mirrored-source record"; }
   read_cursor "$id"
-  if [ "$CURSOR_OFFSET" -eq "$to" ] && [ "$CURSOR_HASH" = "$to_hash" ]; then
+  if [ -z "$seq" ] && [ "$CURSOR_OFFSET" -eq "$to" ] && [ "$CURSOR_HASH" = "$to_hash" ]; then
     cursor_already=1
   elif [ "$CURSOR_OFFSET" -ne "$from" ] || [ "$CURSOR_HASH" != "$from_hash" ]; then
     die "result does not continue the current cursor for $id"
@@ -600,6 +627,8 @@ cmd_ingest() {
     return 3
   fi
   [ "$status" = delta ] && [ "$payload_bytes" -gt 0 ] || { fm_lock_release "$lock"; die "delta result has no payload"; }
+  [ "$to" -gt "$from" ] && [ "$((to - from))" -eq "$payload_bytes" ] \
+    || { fm_lock_release "$lock"; die "delta offsets do not match its payload size"; }
   # Every document this delta OFFERS, deduplicated across the whole delta, is
   # attempted exactly once.
   if ! offered=$(extract_document_pointers "$normalized_payload"); then
@@ -682,14 +711,33 @@ EOF
 }
 
 cmd_handle_locked() {
-  local id=${1:-} seq=${2:-} result=${3:-} sid class rc=0 to
+  local id=${1:-} seq=${2:-} result=${3:-} sid class rc=0 to from from_hash to_hash captured
   validate_id "$id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer" ;; esac
   sid=$(source_id "$id")
+  captured="$STATE/procevent-inbox/$sid.$seq.result"
+  if ! { [ -d "$STATE/procevent-inbox" ] && [ ! -L "$STATE/procevent-inbox" ] \
+    && [ -f "$captured" ] && [ ! -L "$captured" ] \
+    && [ -f "${captured%.result}.adapter" ] && [ ! -L "${captured%.result}.adapter" ] \
+    && [ -f "$result" ] && [ ! -L "$result" ] \
+    && cmp -s -- "$result" "$captured"; }; then
+    die "result does not match the captured remote reply generation"
+  fi
+  printf 'remote-reply\n' | cmp -s - "${captured%.result}.adapter" \
+    || die "captured generation is not owned by the remote reply adapter"
+  result=$captured
   class=$(classify_result "$result")
   [ "$class" != malformed ] || die "remote reply result is malformed"
   if ingest_receipt_matches "$id" "$seq" "$result"; then
+    write_ingest_receipt "$id" "$seq" "$result" || die "cannot commit remote reply ingestion receipt"
     to=$(result_field "$result" to_offset) || die "result end offset is ambiguous"
+    from=$(result_field "$result" from_offset) || die "result start offset is ambiguous"
+    from_hash=$(result_field "$result" from_prefix_sha256) || die "result start hash is ambiguous"
+    to_hash=$(result_field "$result" to_prefix_sha256) || die "result end hash is ambiguous"
+    read_cursor "$id"
+    if [ "$CURSOR_OFFSET" -eq "$from" ] && [ "$CURSOR_HASH" = "$from_hash" ]; then
+      write_cursor "$id" "$to" "$to_hash" || die "cannot complete remote reply cursor"
+    fi
     printf 'ingested: %s appended=0 offset=%s\n' "$id" "$to"
   else
     cmd_ingest "$id" "$result" "$seq" || rc=$?
