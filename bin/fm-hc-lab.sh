@@ -33,13 +33,13 @@
 # and, when set, $XDG_RUNTIME_DIR/herdr-core - as a fleet tripwire, recorded inside the
 # session's own lab directory as fleet-state.txt plus the resolved root list
 # in fleet-roots.txt (recorded once, so a caller that repoints XDG for its own
-# children cannot shift what the tripwire watches). The snapshot is file
-# metadata only (never an `hc` call: hc auto-starts a stopped core on
+# children cannot shift what the tripwire watches). The snapshot records file
+# paths and socket identities (never an `hc` call: hc auto-starts a stopped core on
 # contact, which would itself disturb the state being verified). Teardown
 # stops the lab server and sweeps session processes, then requires a complete,
 # byte-identical snapshot before removing the session directory and sockets.
-# Failed reads or changed real-core metadata refuse verification and retain
-# the lab directory for inspection, never reducing the failure to a warning.
+# A transient read or mismatch is retried briefly. Persistent read failures or
+# changes retain the lab directory for inspection, never just a warning.
 set -u
 
 fm_hclab_error() {
@@ -146,8 +146,10 @@ fm_hclab_real_state_roots() {
   printf '%s\n' "/run/user/${UID}/herdr-core"
 }
 
-# fm_hclab_fleet_state: a sorted metadata inventory of the real core state:
-# path, inode, mtime, size for every file under the roots passed as arguments.
+# fm_hclab_fleet_state: a sorted inventory of regular file paths and socket
+# paths and inodes under the roots passed as arguments. Regular files can be
+# rewritten or replaced during ordinary fleet activity. File content changes
+# and socket replacements that reuse the same inode are not detected.
 # This is a pure filesystem read - deliberately NOT an `hc` call, because
 # contacting a stopped core auto-starts it and would itself dirty the
 # tripwire. The root list is resolved once at provision and recorded in
@@ -155,9 +157,9 @@ fm_hclab_real_state_roots() {
 # (the liveness test does) and the tripwire must always compare the SAME
 # real-state roots provision saw.
 if [ "$(uname 2>/dev/null)" = Darwin ]; then
-  fm_hclab_file_meta() { /usr/bin/stat -f '%N %i %m %z' "$1" 2>/dev/null; }
+  fm_hclab_file_meta() { /usr/bin/stat -f '%N %i' "$1" 2>/dev/null; }
 else
-  fm_hclab_file_meta() { stat -c '%n %i %Y %s' "$1" 2>/dev/null; }
+  fm_hclab_file_meta() { stat -c '%n %i' "$1" 2>/dev/null; }
 fi
 
 fm_hclab_fleet_state() ( # <root>...
@@ -168,7 +170,15 @@ fm_hclab_fleet_state() ( # <root>...
     files=$(find "$root" \( -type f -o -type s \) -print | LC_ALL=C sort) || return 1
     [ -n "$files" ] || continue
     printf '%s\n' "$files" | while IFS= read -r f; do
-      fm_hclab_file_meta "$f" || return 1
+      if [ -S "$f" ]; then
+        printf 'socket '
+        fm_hclab_file_meta "$f" || return 1
+      elif [ -f "$f" ]; then
+        fm_hclab_file_meta "$f" >/dev/null || return 1
+        printf 'file %s\n' "$f"
+      else
+        return 1
+      fi
     done || return 1
   done | LC_ALL=C sort
 )
@@ -181,7 +191,7 @@ fm_hclab_fleet_state_recorded() ( # <roots-file>
 )
 
 fm_hclab_check_tripwire() { # <session>
-  local name=$1 tripwire roots_file before after
+  local name=$1 tripwire roots_file before after candidate attempt complete=0
   tripwire=$(fm_hclab_tripwire_path "$name")
   roots_file=$(fm_hclab_roots_path "$name")
   [ -f "$tripwire" ] || {
@@ -192,16 +202,26 @@ fm_hclab_check_tripwire() { # <session>
     fm_hclab_error "missing fleet-state roots record for '$name'; refusing unverified teardown"
     return 1
   }
-  if ! before=$(cat "$tripwire") || ! after=$(fm_hclab_fleet_state_recorded "$roots_file"); then
+  if ! before=$(cat "$tripwire"); then
     fm_hclab_error "could not read complete fleet-state snapshot; refusing unverified teardown"
     return 1
   fi
-  [ "$before" = "$after" ] || {
-    fm_hclab_error "FLEET-STATE TRIPWIRE FAILED: real herdr-core state changed during lab work"
-    fm_hclab_error "before: $(printf '%s' "$before" | wc -l | tr -d ' ') files; after: $(printf '%s' "$after" | wc -l | tr -d ' ') files"
-    diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") >&2 || true
+  for attempt in 1 2 3; do
+    if candidate=$(fm_hclab_fleet_state_recorded "$roots_file"); then
+      after=$candidate
+      complete=1
+      [ "$before" = "$after" ] && return 0
+    fi
+    [ "$attempt" -eq 3 ] || sleep 0.1
+  done
+  if [ "$complete" -eq 0 ]; then
+    fm_hclab_error "could not read complete fleet-state snapshot; refusing unverified teardown"
     return 1
-  }
+  fi
+  fm_hclab_error "FLEET-STATE TRIPWIRE FAILED: real herdr-core state changed during lab work"
+  fm_hclab_error "before: $(printf '%s' "$before" | wc -l | tr -d ' ') files; after: $(printf '%s' "$after" | wc -l | tr -d ' ') files"
+  diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") >&2 || true
+  return 1
 }
 
 fm_hclab_provision() { # <session>

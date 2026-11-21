@@ -22,6 +22,16 @@ SH
 cat > "$TMP_ROOT/fakebin/find" <<'SH'
 #!/usr/bin/env bash
 [ "${FAIL_READ:-}" != find ] || exit 1
+if [ -n "${FAIL_ONCE_MARK:-}" ] && [ ! -e "$FAIL_ONCE_MARK" ]; then
+  : > "$FAIL_ONCE_MARK"
+  exit 1
+fi
+if [ -n "${MISMATCH_ONCE_MARK:-}" ] && [ ! -e "$MISMATCH_ONCE_MARK" ]; then
+  : > "$MISMATCH_ONCE_MARK"
+  "$REAL_FIND" "$@"
+  printf '%s\n' "$MISMATCH_ONCE_MARK"
+  exit 0
+fi
 if [ "${FAIL_READ:-}" = metadata ]; then
   # Simulate a file disappearing between inventory and metadata collection.
   printf '%s/missing-file\n' "$1"
@@ -86,4 +96,58 @@ refuse 'could not record the fleet-state tripwire' env FAIL_READ=find bash "$LAB
 [ ! -e "$FM_HC_LAB_DIR/fm-hclab-incomplete" ] || fail 'incomplete provision retained'
 bash "$LAB" teardown fm-hclab-good
 [ ! -e "$FM_HC_LAB_DIR/fm-hclab-good" ] || fail 'successful teardown retained session'
+
+state="$XDG_STATE_HOME/herdr-core"
+mkdir -p "$state/default"
+printf 'initial\n' > "$state/default/terminals.json"
+bash "$LAB" provision fm-hclab-churn
+printf 'new status and turn\n' > "$state/default/new-terminals"
+mv "$state/default/new-terminals" "$state/default/terminals.json"
+env XDG_STATE_HOME="$TMP_ROOT/other-state" bash "$LAB" teardown fm-hclab-churn \
+  || fail 'ordinary state churn tripped the guard'
+
+bash "$LAB" provision fm-hclab-transient
+env FAIL_ONCE_MARK="$TMP_ROOT/find-failed-once" bash "$LAB" teardown fm-hclab-transient \
+  || fail 'a transient inventory read failure tripped the guard'
+[ -e "$TMP_ROOT/find-failed-once" ] || fail 'transient read failure was not exercised'
+
+bash "$LAB" provision fm-hclab-transient-entry
+env MISMATCH_ONCE_MARK="$TMP_ROOT/find-extra-once" bash "$LAB" teardown fm-hclab-transient-entry \
+  || fail 'a transient inventory entry tripped the guard'
+[ -e "$TMP_ROOT/find-extra-once" ] || fail 'transient inventory mismatch was not exercised'
+
+bash "$LAB" provision fm-hclab-created
+printf 'unexpected\n' > "$state/default/extra"
+refuse 'FLEET-STATE TRIPWIRE FAILED' bash "$LAB" teardown fm-hclab-created
+[ -d "$FM_HC_LAB_DIR/fm-hclab-created" ] || fail 'created file did not retain evidence'
+rm "$state/default/extra"
+bash "$LAB" teardown fm-hclab-created
+
+bash "$LAB" provision fm-hclab-deleted
+mv "$state/default/terminals.json" "$TMP_ROOT/saved-terminals"
+refuse 'FLEET-STATE TRIPWIRE FAILED' bash "$LAB" teardown fm-hclab-deleted
+mv "$TMP_ROOT/saved-terminals" "$state/default/terminals.json"
+bash "$LAB" teardown fm-hclab-deleted
+
+python3 - "$state/default/core.sock" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+PY
+bash "$LAB" provision fm-hclab-socket-missing
+mv "$state/default/core.sock" "$TMP_ROOT/saved.sock"
+refuse 'FLEET-STATE TRIPWIRE FAILED' bash "$LAB" teardown fm-hclab-socket-missing
+mv "$TMP_ROOT/saved.sock" "$state/default/core.sock"
+bash "$LAB" teardown fm-hclab-socket-missing
+
+bash "$LAB" provision fm-hclab-socket
+python3 - "$state/default/core.sock" <<'PY'
+import os, socket, sys
+path = sys.argv[1]
+s = socket.socket(socket.AF_UNIX)
+s.bind(path + '.replacement')
+os.replace(path + '.replacement', path)
+PY
+refuse 'FLEET-STATE TRIPWIRE FAILED' bash "$LAB" teardown fm-hclab-socket
+[ -d "$FM_HC_LAB_DIR/fm-hclab-socket" ] || fail 'replaced socket did not retain evidence'
 printf 'ok - private roots, exclusive sessions, and fail-closed tripwire\n'
