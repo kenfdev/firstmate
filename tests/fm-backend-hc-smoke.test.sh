@@ -102,6 +102,27 @@ T="$SES:$ADDR"
 fm_backend_target_exists hc "$T" "$LABEL" || fail "the new terminal must exist under its label"
 pass "hc smoke: create_task started $T"
 
+ADDR2=$(fm_backend_hc_create_task "$SES" fm-smoke2 "$WORK_DIR") || fail "second create_task failed"
+ADDR3=$(FM_HC_SPACE=custom-space fm_backend_hc_create_task "$SES" fm-smoke3 "$WORK_DIR") || fail "custom-space create_task failed"
+HOMETAG=$(fm_backend_hometag)
+labels1=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" get --json "$ADDR") || fail "first task labels unavailable"
+labels2=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" get --json "$ADDR2") || fail "second task labels unavailable"
+labels3=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" get --json "$ADDR3") || fail "custom-space task labels unavailable"
+printf '%s\n%s\n' "$labels1" "$labels2" | jq -se --arg space "fm-$HOMETAG" --arg tag "$HOMETAG" '
+  length == 2 and all(.[]; .labels["herdr.space"] == $space and .labels["herdr.seen"] == "0")
+  and .[0].labels["herdr.tab"] == ($tag + "-fm-smoke1")
+  and .[1].labels["herdr.tab"] == ($tag + "-fm-smoke2")' >/dev/null \
+  || fail "tasks must share the home space, have distinct tabs, and start seen at turn zero"
+printf '%s' "$labels3" | jq -e '.labels["herdr.space"] == "custom-space" and .labels["herdr.seen"] == "0"' >/dev/null \
+  || fail "the space override must place the task in its selected space"
+"$ROOT/bin/fm-hc-lab.sh" run "$SES" label "$ADDR" herdr.pinned=1 herdr.seen=3 >/dev/null \
+  || fail "could not set shared client labels"
+fm_backend_capture hc "$T" 10 "$LABEL" >/dev/null || fail "capture failed after shared label change"
+labels1=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" get --json "$ADDR") || fail "updated labels unavailable"
+printf '%s' "$labels1" | jq -e '.labels["herdr.pinned"] == "1" and .labels["herdr.seen"] == "3"' >/dev/null \
+  || fail "capture must preserve shared pinned and seen labels"
+pass "hc smoke: home grouping and task tabs preserve shared client labels"
+
 mkdir -p "$WORK_DIR/sub"
 fm_backend_hc_send_text_line "$T" "cd sub" "$LABEL" || fail "send_text_line failed"
 path_is_sub() { [ "$(fm_backend_hc_current_path "$T" "$LABEL")" = "$WORK_DIR/sub" ]; }

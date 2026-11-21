@@ -71,6 +71,7 @@ The terminal carries these labels:
 | `firstmate.home` | `<hometag>` from `bin/fm-backend-hometag-lib.sh` | Keeps two homes with the same task id apart. |
 | `herdr.space` | `FM_HC_SPACE`, default `fm-<hometag>` | Groups a home's tasks in one Herdr.app space. |
 | `herdr.tab` | `<hometag>-fm-<id>` | One Herdr.app tab per task. |
+| `herdr.seen` | `0` at creation | Lets Herdr clients show later completed turns as unseen. |
 
 ```text
 backend=hc
@@ -117,6 +118,12 @@ An input, capture, or close that carries the task label refuses a terminal whose
 - A worker inherits `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` from its terminal, and the `config/launch-env-allowlist` floor keeps them; whether a real harness then reports native status under Firstmate's launch is not verified.
 - Naming a Herdr.app space needs the app window and is not done.
   The `herdr.space`/`herdr.tab` label contract above is the app's documented bridge (its window projects labeled terminals as spaces/tabs and keeps unlabeled ones hidden), verified against a real window: [`verification/runtime-backends.md`](verification/runtime-backends.md#hc) records the live exercise.
+- The `herdr` backend's project-group sidebar tokens, sorted agents view, and per-task presentation spaces have no equivalent in the hc adapter.
+  The app owns its layout and space names; the shared `herdr-project-groups` and `herdr-presentation-spaces` settings apply only to the `herdr` backend.
+- Firstmate does not change `herdr.pinned` or update `herdr.seen` after creation.
+  Herdr clients own pinning and mark turns seen when a person views them.
+- Firstmate does not place individual workers on an hc machine with `--on`.
+  [Remote second-mate support](remote-secondmates.md) uses a separate remote home and does not place individual workers remotely.
 - Supervision uses a home-filtered `hc events` stream for reported blocked and working states.
   Its subscription snapshot catches blocked states after reconnect, and polling remains the fallback when the event command, reader, or stream is unavailable.
   A terminal that does not report native status remains on the polling path.

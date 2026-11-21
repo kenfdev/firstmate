@@ -291,7 +291,8 @@ fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
   out=$(fm_backend_hc_cli "$session" run --bg --json --no-parent --outlive-parent --no-notify \
     --cwd "$cwd" \
     --label "firstmate.task=$label" --label "firstmate.home=$home" \
-    --label "herdr.space=${FM_HC_SPACE:-fm-$home}" --label "herdr.tab=$scoped" 2>&1) \
+    --label "herdr.space=${FM_HC_SPACE:-fm-$home}" --label "herdr.tab=$scoped" \
+    --label "herdr.seen=0" 2>&1) \
     || { echo "error: hc run failed for $label: $out" >&2; return 1; }
   address=$(printf '%s' "$out" | jq -r '.address // empty' 2>/dev/null)
   fm_backend_hc_address_valid "$address" || { echo "error: hc run did not return a terminal address for $label (got: $out)" >&2; return 1; }
