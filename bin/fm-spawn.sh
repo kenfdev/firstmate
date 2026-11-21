@@ -1345,7 +1345,7 @@ fi
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
-  local remote_rex_session_id remote_rex_server remote_rex_ok
+  local remote_rex_session_id remote_rex_server remote_rex_ok remote_hc_session remote_hc_terminal
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc account_config
   local -a launch_args
   id=${POS[0]:-}
@@ -1451,9 +1451,9 @@ spawn_remote_secondmate() {
     fi
   fi
   # A remote second mate runs only on a backend whose session-provider server
-  # outlives every SSH connection that supervises it: herdr (its server belongs
-  # to the host's GUI login session) is the default; rex runs on the host's
-  # persistent personal rex server. Without an explicit selection a relaunch
+  # outlives every SSH connection that supervises it. New routes prefer hc
+  # when the primary uses hc, otherwise herdr; rex is an explicit choice.
+  # Without an explicit selection a relaunch
   # keeps the backend its record names, and a record written before rex
   # existed names none, so it is herdr. bin/fm-remote-doctor.sh gates that host
   # on the selected backend, and the remote home's config/backend never
@@ -1462,13 +1462,21 @@ spawn_remote_secondmate() {
   if [ -z "$backend" ] && [ -f "$meta" ]; then
     backend=$(fm_meta_get "$meta" remote_backend)
   fi
-  case "${backend:--}" in
-  -) backend=herdr ;;
-  herdr | rex) ;;
+  if [ -z "$backend" ]; then
+    if [ -f "$meta" ]; then
+      backend=herdr
+    elif [ "$(fm_backend_name)" = hc ]; then
+      backend=hc
+    else
+      backend=herdr
+    fi
+  fi
+  case "$backend" in
+  herdr | rex | hc) ;;
   *)
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: a remote secondmate runs only on the herdr or rex backend, not '$backend'" >&2
+    echo "error: a remote secondmate runs only on the herdr, rex, or hc backend, not '$backend'" >&2
     return 1
     ;;
   esac
@@ -1549,7 +1557,11 @@ spawn_remote_secondmate() {
     remote_traceparent=$(FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CONFIG" "$meta" || true)
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
-  [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  if [ "$backend" = hc ] && [ -f "$meta" ]; then
+    launch_args+=("$remote_traceparent" --require-existing)
+  elif [ -n "$remote_traceparent" ]; then
+    launch_args+=("$remote_traceparent")
+  fi
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" </dev/null 2>&1); then
     rc=0
@@ -1594,6 +1606,19 @@ spawn_remote_secondmate() {
         fm_lock_release "$registry_lock" || true
         fm_lock_release "$SPAWN_TASK_LOCK" || true
         echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote' or a code-root-derived 'fm-remote-<id>'; preserving the remote route for reconciliation" >&2
+        return 1
+      fi
+      ;;
+    hc)
+      remote_hc_session=$(printf '%s\n' "$out" | sed -n 's/^hc_session=//p' | tail -1)
+      remote_hc_terminal=$(printf '%s\n' "$out" | sed -n 's/^hc_terminal=//p' | tail -1)
+      if ! fm_remote_hc_session_valid "$remote_hc_session" \
+        || [ "$remote_target" != "$remote_hc_session:$remote_hc_terminal" ] \
+        || ! fm_backend_source hc || ! fm_backend_hc_address_valid "$remote_hc_terminal"; then
+        fm_lock_release "$remote_lock" || true
+        fm_lock_release "$registry_lock" || true
+        fm_lock_release "$SPAWN_TASK_LOCK" || true
+        echo "error: remote launch returned malformed hc route metadata; preserving the remote route for reconciliation" >&2
         return 1
       fi
       ;;
@@ -1646,6 +1671,7 @@ spawn_remote_secondmate() {
     echo "remote_backend=$remote_backend"
     case "$remote_backend" in
       herdr) echo "remote_herdr_session=$remote_herdr_session" ;;
+      hc) echo "remote_hc_session=$remote_hc_session"; echo "remote_hc_terminal=$remote_hc_terminal" ;;
       rex)
         echo "remote_rex_session_id=$remote_rex_session_id"
         echo "remote_rex_server=$remote_rex_server"

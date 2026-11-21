@@ -761,9 +761,9 @@ test_sweep_noop_with_no_secondmate_meta() {
 
 # --- library level: the watcher's poll-mode remote probe ---------------------
 # bin/fm-secondmate-liveness-lib.sh's `poll` mode is the read-only probe the
-# watcher tick runs per cadence: exactly one remote `state` call, `dead` and
-# `missing` alone authorize relaunch, and transport failure (ssh exit 255) is
-# never evidence of death. Full-mode remote readiness repair and route
+# watcher tick runs per cadence: exactly one remote `state` call. `dead` and
+# `missing` can authorize relaunch, except a missing hc record remains
+# unverified. Transport failure (ssh exit 255) is never evidence of death. Full-mode remote readiness repair and route
 # revalidation remain the startup sweep's own behavior, covered by the sweep
 # tests above and tests/fm-remote-secondmate-lifecycle-e2e.test.sh.
 
@@ -973,6 +973,22 @@ test_remote_full_probe_rex_readiness_verdicts() {
   pass "full probe: rex readiness gaps and unreachable hosts stay explicit"
 }
 
+test_remote_hc_missing_record_preserves_route() {
+  local w out
+  w=$(make_remote_probe_world_rex probe-hc-missing)
+  sed -i.bak 's/^remote_backend=rex$/remote_backend=hc/' "$w/home/state/rsm1.meta"
+  rm -f "$w/home/state/rsm1.meta.bak"
+  out=$(probe_remote "$w" full FM_FAKE_ROUTE_BACKEND=hc)
+  [ "$out" = 'alive|alive|0|||' ] || fail "a live hc route should stay alive, got: $out"
+  out=$(probe_remote "$w" poll FM_FAKE_REMOTE_REPLY=dead)
+  [ "$out" = 'relaunchable|dead|0|remote endpoint dead on its configured host|host=lab-host|' ] \
+    || fail "a confirmed-dead hc route should be recoverable, got: $out"
+  out=$(probe_remote "$w" poll FM_FAKE_REMOTE_REPLY=missing)
+  [ "$out" = 'skipped|missing|0|||remote hc endpoint metadata is missing on lab-host; route preserved' ] \
+    || fail "missing hc metadata must preserve the route, got: $out"
+  pass "remote hc liveness handles live, dead, and missing records"
+}
+
 test_remote_full_probe_legacy_record_defaults_herdr() {
   local w out
   w=$(make_remote_probe_world_rex probe-legacy)
@@ -1018,5 +1034,6 @@ test_remote_full_probe_rex_route
 test_remote_full_probe_rex_backend_drift
 test_remote_full_probe_rex_readiness_verdicts
 test_remote_full_probe_legacy_record_defaults_herdr
+test_remote_hc_missing_record_preserves_route
 
 echo "# all fm-secondmate-liveness tests passed"

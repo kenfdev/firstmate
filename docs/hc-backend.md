@@ -53,7 +53,7 @@ An auto-detected hc prints a stderr notice naming the winning signal and how to 
 
 Auto-detected hc spawns carry the same `herdr.space`/`herdr.tab` labels an explicit hc spawn does, so workers appear in the captain's window without the app ever being started by Firstmate.
 The app is local GUI presentation only; detection reads the terminal's core-side label without requiring a live app window, so a surviving labeled terminal can still select hc after the GUI closes.
-An hc primary can use remote secondmates on `herdr` or `rex` through the separate remote home described in [Remote second mates](remote-secondmates.md).
+An hc primary defaults new remote secondmates to hc and can select `herdr` or `rex` explicitly through the separate remote home described in [Remote second mates](remote-secondmates.md).
 
 Away-mode supervisor discovery is owned by [Away-mode supervisor backend](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target).
 
@@ -156,7 +156,7 @@ The daemon checks that the supervisor composer is empty before sending marked in
 ## Tests
 
 `tests/fm-backend-hc.test.sh` pins the adapter against a fake `hc`.
-`tests/fm-remote-secondmate-lifecycle-e2e.test.sh` exercises an hc primary with fake remote `herdr` and `rex` backends and a stub SSH transport.
+`tests/fm-remote-secondmate-lifecycle-e2e.test.sh` exercises an hc primary with fake remote `herdr`, `rex`, and `hc` backends and a stub SSH transport.
 `tests/fm-backend-hc-liveness-live-e2e.test.sh` is the default-on live guard: it launches every installed harness bare in a private core and requires `alive`.
 `tests/fm-backend-hc-smoke.test.sh` drives the real binary and event stream in an isolated lab; [`bin/fm-hc-lab.sh`](../bin/fm-hc-lab.sh) owns the isolation and fleet-state tripwire contract, and [`tests/hc-test-safety.sh`](../tests/hc-test-safety.sh) owns guarded test teardown.
 `tests/fm-backend-hc-appdetect-smoke.test.sh` runs a real `bin/fm-spawn.sh` spawn in the same kind of lab for the app-terminal and explicit cases, and checks that a live app window never selects hc for a marker-less process and starts nothing for a session with no running core.

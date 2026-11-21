@@ -356,6 +356,7 @@ doctor() {
   DOCTOR_OUT=$(
     HOME="$CASE_HOME" \
     FM_HOME="$CASE_PROJECT_HOME" \
+    FM_HC_BIN='' \
     PATH="$CASE_HOME/.local/bin:$CASE_BIN:$BASE_PATH" \
     FM_FAKE_STATE="$CASE_STATE" \
     FM_FAKE_LAUNCHCTL_LOG="$CASE_LAUNCHCTL_LOG" \
@@ -1216,6 +1217,65 @@ assert_contains "$DOCTOR_OUT" 'check entrypoint-link=human:' "an operator-owned 
 unset FM_ROOT_OVERRIDE
 pass "the entrypoint symlink is recreated when absent and never overwritten when operator-owned"
 
+
+# hc must resolve and its core must answer its generation handshake in the
+# job worker environment. The fixture never invokes the runner's real core.
+new_case Linux without-herdr no-gui
+doctor --backend hc
+assert_contains "$DOCTOR_OUT" 'required hc=MISSING' "missing hc was not reported"
+assert_contains "$DOCTOR_OUT" 'check hc=human:' "missing hc core was not refused"
+cat > "$CASE_BIN/herdr-core" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf 'hc 0.1.21\n' ;;
+  server) [ ! -f "$FM_FAKE_STATE/hc-down" ] || exit 1; printf '{}\n' ;;
+  connect) read -r _ || true; printf '{"jsonrpc":"2.0","id":1,"result":{"generation":1}}\n' ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$CASE_BIN/herdr-core"
+doctor --backend hc
+assert_contains "$DOCTOR_OUT" 'check hc=ok:' "startable hc core was not accepted"
+assert_contains "$DOCTOR_OUT" "required hc=$CASE_BIN/herdr-core" "herdr-core binary was not reported"
+touch "$CASE_STATE/hc-down"
+doctor --backend hc
+assert_contains "$DOCTOR_OUT" 'check hc=human:' "failed hc core was accepted"
+assert_not_contains "$DOCTOR_OUT" 'check hc=ok:' "failed hc core was reported healthy"
+pass "hc readiness requires an installed binary and a startable core"
+
+new_case Linux without-herdr no-gui
+CASE_REMOTE_JOB_ACTIVE=
+CASE_PLATFORM_OVERRIDE=Linux
+rm -f "$CASE_BIN/sleep" "$CASE_BIN/uname"
+mkdir -p "$CASE_HOME/.local/bin"
+for tool in tasks-axi treehouse claude; do ln -s "$CASE_BIN/$tool" "$CASE_HOME/.local/bin/$tool"; done
+cat > "$CASE_HOME/.local/bin/herdr-core" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  --version) printf 'hc 0.1.21\\n' ;;
+  server) [ ! -f '$CASE_STATE/hc-down' ] || exit 1; printf '{}\\n' ;;
+  connect) read -r _ || true; printf '{"jsonrpc":"2.0","id":1,"result":{"generation":1}}\\n' ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$CASE_HOME/.local/bin/herdr-core"
+HOME="$CASE_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  "$ROOT/bin/fm-remote-job-worker.sh" > "$CASE_STATE/worker.out" 2> "$CASE_STATE/worker.err" &
+DOCTOR_WORKER_PID=$!
+for _ in $(seq 1 100); do
+  [ -f "$CASE_HOME/.firstmate/remote-job/worker.ready" ] && break
+  sleep 0.05
+done
+assert_present "$CASE_HOME/.firstmate/remote-job/worker.ready" "hc probe fixture worker did not start"
+doctor --backend hc
+assert_contains "$DOCTOR_OUT" 'check hc=ok:' "doctor did not probe hc through the worker"
+touch "$CASE_STATE/hc-down"
+doctor --backend hc
+assert_contains "$DOCTOR_OUT" 'check hc=human:' "doctor accepted a failing hc worker probe"
+kill -TERM "$DOCTOR_WORKER_PID" 2>/dev/null || true
+wait "$DOCTOR_WORKER_PID" 2>/dev/null || true
+DOCTOR_WORKER_PID=
+pass "hc readiness probes the actual remote job worker"
 
 # --- the rex backend: CLI, API floor, and the persistent-server contract ------
 

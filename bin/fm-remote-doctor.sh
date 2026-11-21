@@ -2,7 +2,7 @@
 # Check, and optionally repair, one remote account's second-mate readiness.
 #
 # Usage:
-#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--fix [--automatic]] [--backend herdr|rex|any]
+#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--fix [--automatic]] [--backend herdr|rex|hc|any]
 #
 # Run it through fm-on.sh so the fixed entrypoint invokes this readiness owner
 # over its plain SSH bootstrap. The command reports the same filesystem-composed
@@ -13,9 +13,9 @@
 # default) uses the shared fm-remote session and launch-agent label for the
 # primary code root; each additional code root uses its own isolated session
 # and launch-agent label. Rex uses the host's own persistent rex server in a
-# 2ndmate-<id>-<hash> session. --backend names the one to verify; the default
-# `any` resolves herdr when its CLI is present, then
-# rex, so a host offering both is still verified for the default backend. On
+# 2ndmate-<id>-<hash> session. hc uses a root-derived core session started
+# in the remote job worker. --backend names the one to verify; the default
+# `any` resolves herdr, then rex, then hc, by available CLI. On
 # the Herdr backend the account needs the Firstmate-owned Aqua Herdr agent plus
 # the sibling dev.firstmate.remote-job worker that runs normal fm-on commands
 # through the Aqua or Linux job-worker path. On darwin, that Herdr agent runs
@@ -35,7 +35,7 @@
 # the CLI and never stops or restarts an answering server: an exit-when-empty
 # server is a human gap that needs an operator-scheduled restart. The remote job
 # worker is backend-independent, so its Aqua login-session requirement is
-# checked under either backend. Doctor remains invokable over the plain-SSH
+# checked under every backend. Doctor remains invokable over the plain-SSH
 # bootstrap path to inspect and repair that worker. SSH cannot create an Aqua
 # session, so a host with no GUI login is a human gap rather than something
 # --fix attempts to bypass.
@@ -133,10 +133,14 @@ while [ "$#" -gt 0 ]; do
     --automatic) AUTOMATIC=1 ;;
     --backend)
       shift
-      case "${1:-}" in herdr | rex | any) DOCTOR_BACKEND=$1 ;; *) usage ;; esac
+      case "${1:-}" in herdr | rex | hc | any) DOCTOR_BACKEND=$1 ;; *) usage ;; esac
       ;;
     --backend=*)
-      case "${1#--backend=}" in herdr | rex | any) DOCTOR_BACKEND=${1#--backend=} ;; *) usage ;; esac
+      case "${1#--backend=}" in herdr | rex | hc | any) DOCTOR_BACKEND=${1#--backend=} ;; *) usage ;; esac
+      ;;
+    --worker-hc-probe)
+      [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || { printf 'error: hc probe requires the remote job worker\n' >&2; exit 64; }
+      MODE='worker-hc-probe'
       ;;
     --worker-tool-probe)
       [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || { printf 'error: worker tool probe requires the remote job worker\n' >&2; exit 64; }
@@ -150,20 +154,22 @@ done
 
 # Resolve which backend this run is responsible for before any check or tool
 # list is derived: an explicit --backend wins, and `any` picks herdr when its
-# CLI resolves (the default backend), then rex, so a host offering both is
-# verified for the default. `none` means no supported backend CLI resolves and
+# CLI resolves, then rex, then hc, so a host offering more than one is
+# verified for the first available backend. `none` means no supported backend CLI resolves and
 # is reported as one backend gap rather than two tool gaps.
 if [ "$DOCTOR_BACKEND" = any ]; then
   if command -v herdr >/dev/null 2>&1; then
     DOCTOR_BACKEND=herdr
   elif command -v rex >/dev/null 2>&1; then
     DOCTOR_BACKEND=rex
+  elif command -v herdr-core >/dev/null 2>&1 || command -v hc >/dev/null 2>&1; then
+    DOCTOR_BACKEND=hc
   else
     DOCTOR_BACKEND=none
   fi
 fi
 case "$DOCTOR_BACKEND" in
-  herdr | rex) REQUIRED_TOOLS=(git jq "$DOCTOR_BACKEND" tasks-axi treehouse) ;;
+  herdr | rex | hc) REQUIRED_TOOLS=(git jq "$DOCTOR_BACKEND" tasks-axi treehouse) ;;
   *) REQUIRED_TOOLS=(git jq backend tasks-axi treehouse) ;;
 esac
 if [ "$DOCTOR_BACKEND" = herdr ] && [ "$MODE" != worker-tool-probe ]; then
@@ -571,7 +577,11 @@ report_required_tools() {
   local tool resolved harness
   MISSING=()
   for tool in "${REQUIRED_TOOLS[@]}"; do
-    resolved=$(command -v "$tool" 2>/dev/null || true)
+    if [ "$tool" = hc ]; then
+      resolved=$(command -v herdr-core 2>/dev/null || command -v hc 2>/dev/null || true)
+    else
+      resolved=$(command -v "$tool" 2>/dev/null || true)
+    fi
     if [ -n "$resolved" ] && [ -x "$resolved" ]; then
       if [ "$tool" = tasks-axi ] && ! fm_tasks_axi_compatible; then
         printf 'required tasks-axi=MISSING (incompatible)\n'
@@ -603,7 +613,7 @@ report_required_tools_from_worker() {
   # probe reports `backend=MISSING` rather than resolving differently.
   local -a probe_args=(--worker-tool-probe)
   case "$DOCTOR_BACKEND" in
-    herdr | rex) probe_args+=(--backend "$DOCTOR_BACKEND") ;;
+    herdr | rex | hc) probe_args+=(--backend "$DOCTOR_BACKEND") ;;
   esac
   if ! job_id=$(fm_remote_job_stage "${HOME:-}" "$FM_ROOT" "${FM_HOME:-}" \
     fm-remote-doctor.sh "${probe_args[@]}" </dev/null); then
@@ -628,7 +638,7 @@ report_required_tools_from_worker() {
     fact=${line#required }
     name=${fact%%=*}
     value=${fact#*=}
-    case "$name" in git | jq | herdr | rex | backend | tasks-axi | treehouse | harness) ;; *) valid=0; continue ;; esac
+    case "$name" in git | jq | herdr | rex | hc | backend | tasks-axi | treehouse | harness) ;; *) valid=0; continue ;; esac
     case "$seen" in *" $name "*) valid=0; continue ;; esac
     seen="$seen$name "
     count=$((count + 1))
@@ -736,8 +746,8 @@ check_herdr() {
 # Reported only when no supported backend CLI resolves at all: one session-
 # provider gap rather than one gap per missing CLI.
 check_backend() {
-  record backend "human: neither the herdr nor the rex CLI resolves on the remote runtime PATH" \
-    "install herdr from https://herdr.dev or Rex on that account, or add a ~/.local/bin wrapper for one; a remote second mate needs one session-provider backend"
+  record backend "human: none of the herdr, rex, or hc CLIs resolves on the remote runtime PATH" \
+    "install herdr, Rex, or Herdr Core on that account, or add a ~/.local/bin wrapper for one; a remote second mate needs one session-provider backend"
 }
 
 # Rex server calls below read through a resolved rex CLI that can never
@@ -1055,6 +1065,33 @@ check_entrypoint_link() {
     "rerun this command with --fix to create it"
 }
 
+# Probe in the long-lived job worker's environment, where the actual launch
+# runs, so the core is never born under the short-lived SSH bootstrap.
+check_hc_core() {
+  local job_id rc=1
+  if [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ]; then
+    hc_worker_probe && rc=0
+  elif remote_job_identity_ok && job_id=$(fm_remote_job_stage "${HOME:-}" "$FM_ROOT" "${FM_HOME:-}" fm-remote-doctor.sh --backend hc --worker-hc-probe </dev/null); then
+    if fm_remote_job_wait "${HOME:-}" "$job_id" && [ "$FM_REMOTE_JOB_EXIT" -eq 0 ]; then rc=0; fi
+    fm_remote_job_reap "${HOME:-}" "$job_id" 2>/dev/null || true
+  fi
+  if [ "$rc" -eq 0 ]; then
+    record hc "ok: hc core starts and answers in the remote job worker"
+  else
+    record hc "human: hc core could not start and answer in the remote job worker" \
+      "install Herdr Core on the remote account and ensure its core can start, then rerun the doctor"
+  fi
+}
+
+hc_worker_probe() {
+  local hc_session
+  hc_session=$(fm_remote_hc_session "$FM_ROOT") || return 1
+  # shellcheck source=bin/fm-backend.sh
+  . "$SCRIPT_DIR/fm-backend.sh" || return 1
+  fm_backend_source hc || return 1
+  HC_SESSION="$hc_session" FM_HC_SOCKET='' fm_backend_hc_container_ensure >/dev/null 2>&1
+}
+
 run_checks() { # <resolved-login-shell>
   local shell=$1
   CHECK_NAMES=()
@@ -1063,6 +1100,7 @@ run_checks() { # <resolved-login-shell>
   case "$DOCTOR_BACKEND" in
     herdr) check_herdr ;;
     rex) check_rex ;;
+    hc) check_hc_core ;;
     *) check_backend ;;
   esac
   check_gui_session
@@ -1342,6 +1380,11 @@ apply_fixes() { # <resolved-login-shell>
 }
 
 # --- report -----------------------------------------------------------------
+
+if [ "$MODE" = worker-hc-probe ]; then
+  hc_worker_probe
+  exit
+fi
 
 if [ "$MODE" = worker-tool-probe ]; then
   report_required_tools

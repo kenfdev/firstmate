@@ -898,7 +898,7 @@ launches_after_inherit=0
 [ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
-out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
+out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --backend herdr)
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"
@@ -1501,7 +1501,7 @@ ssh_before=$(cat "$SSH_COUNT")
 if remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --backend tmux >"$TMP_ROOT/spawn-tmux-backend.out" 2>&1; then
   fail "an unknown remote backend was accepted"
 fi
-assert_grep 'runs only on the herdr or rex backend' "$TMP_ROOT/spawn-tmux-backend.out" \
+assert_grep 'runs only on the herdr, rex, or hc backend' "$TMP_ROOT/spawn-tmux-backend.out" \
   "an unknown remote backend did not fail with the backend refusal"
 [ "$(cat "$SSH_COUNT")" = "$ssh_before" ] || fail "an unknown remote backend still made a remote call"
 
@@ -1671,6 +1671,91 @@ pass "rex retirement refuses server drift and unreadable or unreachable identity
 mv -f "$TMP_ROOT/remote-ios-before-rex.meta" "$remote_route_meta"
 mv -f "$TMP_ROOT/parent-ios-before-rex.meta" "$PARENT/state/ios.meta"
 pass "a remote secondmate may run on rex with strict route validation both ways"
+
+# The primary's hc selection defaults a new remote route to the remote hc
+# process. The fake is installed only on the fixture host's composed PATH.
+cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-hc.meta"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-hc.meta"
+mkdir -p "$TMP_ROOT/hc-fake"
+cat > "$REMOTE_ROOT/bin/herdr-core" <<EOF
+#!/usr/bin/env bash
+D='$TMP_ROOT/hc-fake'
+EOF
+cat >> "$REMOTE_ROOT/bin/herdr-core" <<'SH'
+set -u
+printf '%s %s\n' "${HC_SESSION:-}" "$*" >> "$D/log"
+cmd=${1:-}; shift || true
+case "$cmd" in
+  --version) printf 'hc 0.1.21\n' ;;
+  server) [ ! -f "$D/down" ] || exit 1; printf '{}\n' ;;
+  connect) read -r _ || true; printf '{"jsonrpc":"2.0","id":1,"result":{"generation":1}}\n' ;;
+  ls)
+    if [ -f "$D/terminal.json" ]; then jq -c '{terminals: [.]}' "$D/terminal.json"; else printf '{"terminals":[]}\n'; fi ;;
+  run)
+    task= home= cwd=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --label) case "$2" in firstmate.task=*) task=${2#*=} ;; firstmate.home=*) home=${2#*=} ;; esac; shift 2 ;;
+        --cwd) cwd=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    jq -n --arg task "$task" --arg home "$home" --arg cwd "$cwd" \
+      '{address:"t1",state:"live",cwd:$cwd,labels:{"firstmate.task":$task,"firstmate.home":$home},foreground:{name:"sh",argv:["sh"],pid:1}}' > "$D/terminal.json"
+    printf '{"address":"t1"}\n' ;;
+  get) [ -f "$D/terminal.json" ] || exit 3; cat "$D/terminal.json" ;;
+  read) printf '❯\n' ;;
+  send)
+    jq '.foreground={name:"codex",argv:["codex"],pid:1}' "$D/terminal.json" > "$D/tmp" && mv "$D/tmp" "$D/terminal.json"
+    printf '{"started":true}\n' ;;
+  keys) printf '%s\n' "$*" >> "$D/keys"; printf '{}\n' ;;
+  kill) printf '{}\n' ;;
+  rm) rm -f "$D/terminal.json"; printf '{}\n' ;;
+  *) printf '{}\n' ;;
+esac
+SH
+chmod +x "$REMOTE_ROOT/bin/herdr-core"
+rm -f "$remote_route_meta" "$PARENT/state/ios.meta"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null || fail "hc-primary remote launch failed"
+assert_grep 'remote_backend=hc' "$PARENT/state/ios.meta" "hc primary did not select remote hc"
+assert_grep 'backend=hc' "$remote_route_meta" "remote host did not record hc"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] || fail "remote hc endpoint did not read alive"
+remote_env "$ROOT/bin/fm-send.sh" fm-ios --key Escape >/dev/null || fail "remote hc key delivery failed"
+assert_grep 'esc' "$TMP_ROOT/hc-fake/keys" "remote hc key did not reach the fixture"
+remote_env "$ROOT/bin/fm-send.sh" fm-ios "fixture hc steer" >/dev/null || fail "remote hc steer failed"
+[ -n "$(find "$PARENT_ROUTE_INBOX" -maxdepth 1 -name '*.msg' -print -quit)" ] || fail "remote hc steer was not recorded"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh capture ios 5)" = '❯' ] || fail "remote hc capture failed"
+cp "$remote_route_meta" "$TMP_ROOT/hc-good-route.meta"
+rm -f "$remote_route_meta"
+hc_run_count=$(grep -c ' run ' "$TMP_ROOT/hc-fake/log" || true)
+if remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --backend hc >"$TMP_ROOT/hc-missing-record.out" 2>&1; then
+  fail "parent launched after the remote hc endpoint record went missing"
+fi
+assert_grep 'metadata is missing' "$TMP_ROOT/hc-missing-record.out" "missing hc record refusal was not reported"
+[ "$(grep -c ' run ' "$TMP_ROOT/hc-fake/log" || true)" = "$hc_run_count" ] || fail "missing hc record created another terminal"
+mv "$TMP_ROOT/hc-good-route.meta" "$remote_route_meta"
+cp "$TMP_ROOT/hc-fake/terminal.json" "$TMP_ROOT/hc-terminal-good.json"
+jq '.labels["firstmate.task"]="fm-foreign"' "$TMP_ROOT/hc-terminal-good.json" > "$TMP_ROOT/hc-fake/terminal.json"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = unreadable ] || fail "foreign hc endpoint was trusted"
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - hc >/dev/null 2>&1; then
+  fail "foreign hc endpoint accepted a duplicate launch"
+fi
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh relaunch ios codex - - >/dev/null 2>&1; then
+  fail "foreign hc endpoint accepted relaunch"
+fi
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh retire ios >/dev/null 2>&1; then
+  fail "foreign hc endpoint accepted retirement"
+fi
+rm -f "$TMP_ROOT/hc-fake/terminal.json"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = unreadable ] || fail "missing hc endpoint was treated as proven absent"
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex - - hc >/dev/null 2>&1; then
+  fail "missing hc endpoint accepted an unsafe duplicate launch"
+fi
+mv "$TMP_ROOT/hc-terminal-good.json" "$TMP_ROOT/hc-fake/terminal.json"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --backend herdr >"$TMP_ROOT/hc-override.out" 2>&1 && fail "backend override migrated an existing hc endpoint"
+mv -f "$TMP_ROOT/remote-ios-before-hc.meta" "$remote_route_meta"
+mv -f "$TMP_ROOT/parent-ios-before-hc.meta" "$PARENT/state/ios.meta"
+pass "remote hc launch, input, identity and safe missing-endpoint behavior"
 
 # Host loss never creates a local replacement. Remove both the published ledger
 # and its parent-side cache so the structured-home read degrades explicitly;

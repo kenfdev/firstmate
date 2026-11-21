@@ -21,7 +21,7 @@ Firstmate does not support placing an individual worker remotely or failing a re
 
 ## Where the remote agent runs
 
-The remote second-mate agent runs on one of two session-provider backends, selected per launch.
+The remote second-mate agent runs on one of three session-provider backends, selected per launch.
 [Launch selection and placement](#launch-or-recover) define the backend contract.
 Provisioning checks any available supported backend; launch checks the selected one.
 
@@ -31,6 +31,8 @@ Provisioning checks any available supported backend; launch checks the selected 
   As a result, the agent's endpoint survives every disconnection the primary's supervision depends on.
 - A remote Rex endpoint requires a persistent rex server started with `rex server start`, which is a detached daemon no SSH session owns.
   An ephemeral `rex server run --exit-empty` server exits when its last session or control connection disappears, so it can never satisfy remote readiness.
+- The remote account must have Herdr Core installed for hc.
+  Its core starts from the remote job worker in a code-root-specific session.
 - [Rex's server-stop limits](rex-backend.md#active-limits) explain session restoration and agent recovery.
 - Local second mates are unaffected and keep their ordinary backend and session selection.
   So do the workers a remote second mate supervises inside its own home.
@@ -232,11 +234,11 @@ bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh
 bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --backend rex
 ```
 
-`--backend` names the session backend to verify: `herdr`, `rex`, or `any`.
-The default `any` resolves herdr when its CLI is present and rex otherwise, so a host offering both is verified for the default backend.
+`--backend` names the session backend to verify: `herdr`, `rex`, `hc`, or `any`.
+The default `any` resolves herdr first, then rex, then hc, based on the available CLI.
 The launch path passes the launch's own selection, so the gate a launch passes is the gate for the backend it will use.
 
-That run is read-only.
+An hc readiness check may start its dedicated core from the remote job worker.
 It takes these steps:
 
 1. It prints the exact `PATH` its own entrypoint launch produced.
@@ -339,7 +341,7 @@ A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own sym
 
 | Requirement | Tools |
 | --- | --- |
-| Always required | `git`, `jq`, the selected backend's CLI (`herdr` or `rex`), compatible `tasks-axi`, and `treehouse` |
+| Always required | `git`, `jq`, the selected backend's CLI (`herdr`, `rex`, or Herdr Core), compatible `tasks-axi`, and `treehouse` |
 | At least one of | `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `omp` |
 | Additionally required on macOS | `lsof`, so the doctor and guard can prove which process owns the session socket |
 
@@ -443,18 +445,20 @@ The primary then takes these steps:
 3. It transfers the inherited-material allowlist.
 4. It asks the remote host to launch on that backend.
 
-A new route defaults to Herdr; pass `--backend rex` to select Rex.
+A new route defaults to hc when the primary selects hc, and to Herdr otherwise.
+Pass `--backend herdr`, `--backend rex`, or `--backend hc` to override that choice.
 Without an explicit backend, a later launch or liveness recovery preserves the parent's recorded `remote_backend`; legacy records without that field use Herdr.
 An existing endpoint on a different backend is refused rather than migrated.
 Placement is per backend:
 
 - Herdr: all remote secondmates of one code root on a host share that root's remote session, `fm-remote` for the account's primary root, and retain separate `2ndmate-<id>` workspaces inside it.
+- hc: remote secondmates of one code root share a dedicated root-derived hc session and carry separate task and home labels.
 - Rex: each remote secondmate home gets its own `2ndmate-<id>-<hash>` session on the host's persistent personal rex server, the same placement rule a local secondmate home uses.
 
 ### Refused and unsupported launches
 
-- An explicit request for any backend other than herdr or rex is refused rather than honored, and the remote host refuses one too.
-- An existing remote endpoint recorded outside its backend's contract - a Herdr session other than its code root's remote session, or a Rex route whose recorded server is not a local `unix://` endpoint - is classified as unverified and left untouched.
+- An explicit request for any backend other than herdr, rex, or hc is refused rather than honored, and the remote host refuses one too.
+- An existing remote endpoint recorded outside its backend's contract - a Herdr session other than its code root's remote session, a Rex route whose recorded server is not a local `unix://` endpoint, or an hc route outside its code root session - is classified as unverified and left untouched.
   Launch, liveness recovery, control, and retirement refuse it until an operator explicitly migrates it, instead of attempting a live cutover.
 - A launch after a host has drifted out of readiness fails with the doctor's own gap text instead of leaving a half-created endpoint.
 - Raw launch commands are not accepted for remote secondmates.
@@ -462,7 +466,9 @@ Placement is per backend:
 
 ### Liveness recovery
 
-Startup liveness recovery relaunches a dead or missing remote second mate through this same command.
+An absent hc endpoint, missing hc endpoint record, or endpoint with different task labels is unverified, so Firstmate preserves its route and refuses a duplicate launch.
+
+Startup liveness recovery relaunches a proven dead or missing remote second mate through this same command.
 So recovery passes the same readiness gate rather than a weaker one.
 
 The watcher's liveness tick applies the identical rule during ordinary supervision through the shared `bin/fm-secondmate-liveness-lib.sh`:

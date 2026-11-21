@@ -112,3 +112,17 @@ fm_remote_herdr_session_name_valid() { # <session>
   [ "${#id}" -eq 16 ] || return 1
   case "$id" in *[!0-9a-f]*) return 1 ;; esac
 }
+
+# An hc session is always root-derived and does not depend on Herdr's mutable
+# service-owner record. The two providers have separate namespaces.
+fm_remote_hc_session() { # <fm-root>
+  local id
+  id=$(fm_remote_herdr_root_id "$1") || return 1
+  printf 'fm-hc-remote-%s\n' "$id"
+}
+
+fm_remote_hc_session_valid() { # <session>
+  local id=${1#fm-hc-remote-}
+  [ "$id" != "$1" ] && [ "${#id}" -eq 16 ] || return 1
+  case "$id" in *[!0-9a-f]*) return 1 ;; esac
+}
