@@ -94,7 +94,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
 | Capture | `hc read --lines <n>` |
 | Visible capture | `hc read --lines 0` |
 | Send a line and submit | `hc send` |
-| Submit with confirmation | `hc send --wait`; see submit safety under Limits |
+| Submit with confirmation | Refused until input can be verified before Enter |
 | Named key | `hc keys` |
 | Current path | `hc get`, the foreground process's `cwd` |
 | Busy state | `hc get`, native `status.state` (`working` is busy) |
@@ -103,11 +103,11 @@ An input, capture, or close that carries the task label refuses a terminal whose
 
 ## Limits
 
-- `hc send` always presses Enter, so hc cannot type without submitting.
+- `hc send` always presses Enter, and `hc keys` cannot type arbitrary Unicode text.
   `bin/fm-spawn.sh` pastes and submits the spawn launch line with `hc send` and consumes the Enter that follows it.
-- Submitting a message uses one bounded `hc send --wait`.
-  A started turn or a still-working wait confirms it natively; otherwise the adapter falls back to the composer screen, with Enter retries only for a proven pending composer.
-  A blocked terminal (exit 9) returns `unknown` without typing or retrying and is never forced.
+- Firstmate refuses verified text delivery and inbox doorbells on hc because it cannot prove the input before Enter.
+  Steers remain in the task inbox, and the watcher reports the undelivered doorbell.
+  Away and quiet supervisor injection remains unsupported.
 - hc reports one foreground process per terminal.
   When that process is a launcher, the adapter also reads the rest of its process group from `ps`, which works only for terminals on the local machine.
 - Right after a terminal starts, `hc get` can report no foreground process yet, and agent state reads `unreadable` until the shell is up.

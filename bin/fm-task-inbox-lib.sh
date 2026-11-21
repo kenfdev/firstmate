@@ -396,6 +396,8 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
+  # hc cannot prove a typed line before its send command presses Enter.
+  [ "$backend" != hc ] || return 2
   if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
     return 2
   fi

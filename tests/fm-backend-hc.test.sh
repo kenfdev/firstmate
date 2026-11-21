@@ -339,32 +339,27 @@ test_container_ensure_gates_binary_version_and_generation() {
   pass "hc: container_ensure refuses a misnamed, old, or wrong-generation binary"
 }
 
-test_send_text_submit_confirms_through_send_wait() {
-  local tag out log
+test_send_text_submit_refuses_unproven_input() {
+  local tag out rc
   setup_case submit
   tag=$(hometag_of)
-  write_terminal "$D" t1 live fm-a1 "$tag" zsh /bin/zsh
-  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1')
-  assert_equals "$out" empty "a started turn confirms the submit"
-  log=$(grep $'\x1fsend\x1f' "$D/log")
-  assert_contains "$log" $'--wait\x1f--timeout\x1f' "submit must confirm through send --wait"
-  assert_contains "$log" $'\x1f--\x1fdeploy now' "the text must arrive after the -- delimiter"
-  printf '9\n' > "$D/send.exit"
-  printf 'blocked\n' > "$D/send.kind"
-  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>&1)
-  assert_contains "$out" unknown "a blocked terminal is unknown, never forced"
-  assert_contains "$out" blocked "the refusal must name the blocked cause"
-  printf '11\n' > "$D/send.exit"
-  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1')
-  assert_equals "$out" send-failed "a finished terminal is send-failed"
-  printf '3\n' > "$D/send.exit"
-  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1')
-  assert_equals "$out" send-failed "a missing terminal is send-failed"
-  rm -f "$D/send.exit" "$D/send.kind"
-  printf '{"started":null,"wait":{"status":"idle","timed_out":true}}\n' > "$D/send.json"
-  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1')
-  assert_equals "$out" unknown "a silent program falls back to the composer screen, which cannot prove empty on a plain pane"
-  pass "hc: send_text_submit proves the turn through send --wait and never forces a blocked terminal"
+  write_terminal "$D" t1 live fm-a1 "$tag" codex /usr/bin/codex
+  : > "$D/log"
+  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>/dev/null)
+  assert_equals "$out" send-failed "unproven input must be refused"
+  if grep -q $'\x1fsend\x1f' "$D/log" || grep -q $'\x1fkeys\x1f' "$D/log"; then
+    fail "refused input must not reach the terminal"
+  fi
+  mkdir -p "$D/t.inbox"
+  printf 'message\n' > "$D/t.inbox/001.msg"
+  rc=0
+  hc_shell '. "'"$FM_TEST_ROOT"'/bin/fm-task-inbox-lib.sh"; fm_task_inbox_ring hc fmtest:t1 "'"$D"'/t.inbox/001.msg" fm-a1' || rc=$?
+  assert_equals "$rc" 2 "hc doorbell must report that it was not delivered"
+  [ -f "$D/t.inbox/001.msg" ] || fail "refusal must preserve the inbox record"
+  if grep -q $'\x1fsend\x1f' "$D/log" || grep -q $'\x1fkeys\x1f' "$D/log"; then
+    fail "refused doorbell must not reach the terminal"
+  fi
+  pass "hc: unproven composer input is refused without typing"
 }
 
 test_send_delimiters_and_binary_socket_pins() {
@@ -461,5 +456,5 @@ fm_test_run \
   test_capture_and_current_path_read_the_recorded_terminal \
   test_endpoint_validation_binds_hc_meta \
   test_container_ensure_gates_binary_version_and_generation \
-  test_send_text_submit_confirms_through_send_wait \
+  test_send_text_submit_refuses_unproven_input \
   test_send_delimiters_and_binary_socket_pins

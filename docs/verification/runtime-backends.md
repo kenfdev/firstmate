@@ -3680,10 +3680,15 @@ The default socket path under the scratchpad temp directory exceeded the 103-byt
 | `hc send <t> 'cd /usr'` | Pasted and submitted; `foreground.cwd` became `/usr`. |
 | `hc --version` (0.1.14, 2026-10-30) | Prints `hc 0.1.14`; the adapter's binary gate requires this `hc x.y.z` shape at or above 0.1.14. |
 | `hello` over `hc connect --session <s>` (0.1.14, 2026-10-30) | Answered `{"result":{"generation":1,...}}`; the adapter refuses any other generation. |
-| `hc send <t> --wait --timeout <n> -- <text>` (0.1.14, 2026-10-30) | Returns `{"started":<bool|null>,"wait":{"status",...}}`; `started:true` or `wait.status:working` natively confirms the submit. Exit 9 is `blocked` (never forced), 3 `not_found`, 11 `finished`; text after `--` survives leading dashes. |
+| `hc send <t> --wait --timeout <n> -- <text>` (0.1.14, 2026-10-30) | Returns `{"started":<bool|null>,"wait":{"status",...}}`; a started turn does not prove which text reached the composer. Exit 9 is `blocked` (never forced), 3 `not_found`, 11 `finished`; text after `--` survives leading dashes. |
 | `hc keys <t> -- <key>` (0.1.14, 2026-10-30) | Accepts the `--` delimiter before key names. |
 | `server stop` on a lab session (0.1.14, 2026-10-30) | Closes the API listener only; the session's `serve` and `hold` daemons stay by design and take ~30-60s to finish exiting after TERM/KILL. `bin/fm-hc-lab.sh` sweeps them by their exact `HC_SESSION=<name>` env token. |
 | `hc get` of a terminal running the user's `claude` wrapper | `foreground` was `{"name":"hats","argv":["/Users/fran/.cargo/bin/hats","run","--"]}`; the Claude process was another member of that process group. |
+
+On 2026-11-21, hc 0.1.21 in a private `fm-hc-lab.sh` session received `keys --json t2 -- d r a f t` followed by `send --json t2 -- INJECTED` into a Python line reader with no reported agent status.
+The screen showed `RECEIVED='draftINJECTED\n'`: the send submitted the existing draft together with the new text.
+With a second draft in the same lab terminal, `fm_backend_hc_send_text_submit` returned `send-failed` and the screen stayed unchanged.
+The terminal had no reported native agent status, so this result does not establish how `--if idle` behaves for an agent that reports idle.
 
 ### Adapter lifecycle
 
@@ -3700,6 +3705,7 @@ ok - hc smoke: secondmate hooks update the parent busy state
 ```
 
 `tests/fm-backend-hc-smoke.test.sh` passed inside a `bin/fm-hc-lab.sh` session (hc 0.1.14, 2026-10-30): an `fm-hclab-*` core with scratch XDG roots, a pinned `FM_HC_SOCKET`, and a fleet-state tripwire that verified the recorded real-core file metadata inventory unchanged afterward.
+The historical submit result below predates the current refusal of unproven text delivery.
 Teardown swept the session's `serve`/`hold` daemons by their `HC_SESSION` env token.
 
 ```text

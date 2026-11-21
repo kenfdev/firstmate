@@ -145,14 +145,17 @@ captured() { fm_backend_capture hc "$T" 50 "$LABEL" | grep -qx 'Smoke-Line-42'; 
 wait_for 10 captured || fail "capture did not show the submitted command's output"
 pass "hc smoke: send_text_line ran the command and capture shows its output"
 
-verdict=$(fm_backend_hc_send_text_submit "$T" "echo Sub-Line-7" 1 0.4 0 "$LABEL")
-case "$verdict" in
-  empty|pending|pending-unproven|unknown) ;;
-  *) fail "send_text_submit returned '$verdict', outside its vocabulary" ;;
-esac
-sub_captured() { fm_backend_capture hc "$T" 50 "$LABEL" | grep -qx 'Sub-Line-7'; }
-wait_for 10 sub_captured || fail "send_text_submit's text never reached the terminal (verdict $verdict)"
-pass "hc smoke: send_text_submit delivers through send --wait (verdict $verdict)"
+"$ROOT/bin/fm-hc-lab.sh" run "$SES" keys --json "$ADDR" -- s a f e d r a f t >/dev/null \
+  || fail "could not type the draft"
+before=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" read --lines 0 "$ADDR")
+assert_contains "$before" safedraft "the draft must be visible before the attempted delivery"
+verdict=$(fm_backend_hc_send_text_submit "$T" "echo Sub-Line-7" 1 0.4 0 "$LABEL" 2>/dev/null)
+assert_equals "$verdict" send-failed "unproven text delivery must be refused"
+after=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" read --lines 0 "$ADDR")
+assert_equals "$after" "$before" "the refused delivery must leave the draft unchanged"
+"$ROOT/bin/fm-hc-lab.sh" run "$SES" keys --json "$ADDR" -- ctrl+u >/dev/null \
+  || fail "could not clear the test draft"
+pass "hc smoke: unproven composer input is refused"
 
 assert_equals "$(fm_backend_agent_state hc "$T")" dead "an idle shell is dead"
 STANDIN=$(fm_agent_standin "$TMP_ROOT/standin") || fail "no agent stand-in survives a foreign name here"

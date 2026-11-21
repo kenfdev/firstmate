@@ -35,9 +35,8 @@
 # space with one tab each. Naming the space needs the app window and is not done.
 #
 # Measured limits on hc 0.1.13 and 0.1.14 (docs/hc-backend.md "Limits"):
-#   - `hc send` always presses Enter after pasting. There is no paste without
-#     submit, so hc cannot type without submitting. `hc send --wait` reports
-#     the turn the send started natively, which is what send_text_submit reads.
+#   - `hc send` presses Enter after pasting, without an opportunity to prove
+#     the composer payload. Typed delivery is refused until it can be proven.
 #   - hc reports one foreground process per terminal (`foreground` in
 #     `hc get`), not a process group; when that process is a launcher,
 #     agent_state also reads the rest of its process group from local `ps`.
@@ -360,55 +359,11 @@ fm_backend_hc_composer_state() {  # <target> [expected-label] -> empty|pending|p
   printf '%s' "$verdict"
 }
 
-# fm_backend_hc_send_text_submit: one `hc send --wait`, which pastes, presses
-# Enter, and reports the turn it started. Echoes
-# empty|pending|pending-unproven|unknown|send-failed, a subset of the
-# proof-carrying submit vocabulary.
-#
-# A started turn or a still-working wait confirms the submit natively, which
-# no composer text can fake. A program that never reports status answers
-# started:null once the bounded wait times out; the send still typed and
-# entered, so the verdict falls back to the composer screen, and only a
-# proven pending composer gets Enter retries through the shared loop. A
-# blocked terminal refuses with exit 9 before typing - unknown, with a
-# diagnostic and no retries, never forced. The other structured refusals
-# (3 not_found, 11 finished) and any other failure are send-failed.
+# hc send submits before Firstmate can prove what reached the composer.
+# Keep typed deliveries unproven until hc exposes a safe input path.
 fm_backend_hc_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected=${6:-}
-  local wait_secs out rc started wait_status verdict
-  case "$retries" in ''|*[!0-9]*) retries=1 ;; esac
-  case "$sleep_s" in ''|*[!0-9.]*) sleep_s=0.4 ;; esac
-  case "$settle" in ''|*[!0-9.]*) settle=0 ;; esac
-  fm_backend_hc_target_ready "$target" "$expected" || { printf 'send-failed'; return 0; }
-  wait_secs=$(awk -v r="$retries" -v s="$sleep_s" 'BEGIN { v = r * s; if (v < 1) v = 1; printf "%d", (v == int(v) ? v : int(v) + 1) }' 2>/dev/null)
-  case "$wait_secs" in ''|*[!0-9]*|0) wait_secs=1 ;; esac
-  out=$(fm_backend_hc_cli "$FM_BACKEND_HC_SESSION" send --json "$FM_BACKEND_HC_ADDRESS" \
-    --wait --timeout "$wait_secs" -- "$text" 2>&1)
-  rc=$?
-  case "$rc" in
-    0) ;;
-    9)
-      echo "error: hc send refused $target - the terminal is blocked waiting on input (never forced): $out" >&2
-      printf 'unknown'
-      return 0
-      ;;
-    *) printf 'send-failed'; return 0 ;;
-  esac
-  started=$(printf '%s' "$out" | jq -r '.started // empty' 2>/dev/null)
-  wait_status=$(printf '%s' "$out" | jq -r '.wait.status // empty' 2>/dev/null)
-  if [ "$started" = true ] || [ "$wait_status" = working ]; then
-    printf 'empty'
-    return 0
-  fi
-  [ "$settle" = 0 ] || sleep "$settle"
-  verdict=$(fm_backend_hc_composer_state "$target" "$expected")
-  case "$verdict" in
-    pending|pending-unproven)
-      fm_composer_submit_retry_core fm_backend_hc_send_key fm_backend_hc_composer_state \
-        "$target" "$retries" "$sleep_s" "$expected"
-      ;;
-    *) printf '%s' "$verdict" ;;
-  esac
+  echo "error: hc cannot safely verify composer input before submission" >&2
+  printf 'send-failed'
 }
 
 # fm_backend_hc_busy_state: hc's native agent status. `working` is busy; the
