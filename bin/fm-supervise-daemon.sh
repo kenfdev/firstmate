@@ -2108,9 +2108,9 @@ fm_super_main() {
     log "warn: could not record this daemon's process identity; the turn-end guard cannot recognize away-mode supervision"
   fi
 
-  # --- auto-discover the supervisor BACKEND (tmux, herdr, or t3code) first --
+  # --- auto-discover the supervisor backend first --
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
-  # (herdr) > TERM_PROGRAM=rex (rex) > a live T3 thread in this home (t3code) >
+  # (herdr) > TERM_PROGRAM=rex (rex) > hc terminal markers > a live T3 thread >
   # tmux fallback. Resolved before the target below, since target discovery
   # composes a herdr "<session>:<pane-id>" string using the same
   # $HERDR_PANE_ID/$HERDR_SESSION markers this checks. Exporting the result
@@ -2127,6 +2127,8 @@ fm_super_main() {
       backend_source="HERDR_ENV"
     elif fm_supervisor_in_rex; then
       backend_source="TERM_PROGRAM"
+    elif [ "$discovered_backend" = hc ]; then
+      backend_source="HC_TERMINAL_ID"
     elif [ "$discovered_backend" = t3code ]; then
       backend_source="T3_THREAD"
     else

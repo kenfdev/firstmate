@@ -94,7 +94,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
 | Capture | `hc read --lines <n>` |
 | Visible capture | `hc read --lines 0` |
 | Send a line and submit | `hc send` |
-| Submit with confirmation | Classify the visible composer, then `hc send --if idle --wait` |
+| Submit with confirmation | Use `hc send --wait`, with an empty-composer and idle guard when hc reports idle |
 | Named key | `hc keys` |
 | Current path | `hc get`, the foreground process's `cwd` |
 | Busy state | `hc get`, native `status.state` (`working` is busy) |
@@ -105,17 +105,16 @@ An input, capture, or close that carries the task label refuses a terminal whose
 
 The away daemon runs in its own hc terminal without Herdr app presentation labels.
 Firstmate records its exact terminal and closes only that terminal when the daemon stops.
-The daemon uses the same composer and idle guards for marked supervisor input as task delivery.
+The daemon checks that the supervisor composer is empty before sending marked input.
 
 ## Limits
 
 - `hc send` always presses Enter, and `hc keys` cannot type arbitrary Unicode text.
   `bin/fm-spawn.sh` pastes and submits the spawn launch line with `hc send` and consumes the Enter that follows it.
-- Firstmate sends a message or inbox doorbell only when the visible composer is confirmed empty and hc reports the target idle.
-  Unknown or pending composers and terminals without an idle status refuse delivery, retaining the task inbox record.
+- When hc reports idle, Firstmate requires a confirmed-empty composer and sends with `--if idle`.
+  When hc does not report idle, Firstmate sends without the idle condition, so a terminal without native status remains reachable.
   The screen read and `hc send` are separate, so a draft can appear between them.
-  Away and quiet escalations stay buffered when the supervisor has no reported idle status or the composer cannot be classified.
-
+  Away and quiet escalations stay buffered when the supervisor composer cannot be classified.
 - hc reports one foreground process per terminal.
   When that process is a launcher, the adapter also reads the rest of its process group from `ps`, which works only for terminals on the local machine.
 - Right after a terminal starts, `hc get` can report no foreground process yet, and agent state reads `unreadable` until the shell is up.

@@ -386,7 +386,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
-# positively identify. hc is stricter because its send also presses Enter.
+# positively identify (that classifier is advisory here by design).
 # A pending composer holding exactly our own doorbell line is a previous ring
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
@@ -400,10 +400,6 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
     return 2
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
-  if [ "$backend" = hc ] && [ "$cstate" != empty ]; then
-    [ "$cstate" != pending ] || return 1
-    return 2
-  fi
   case "$cstate" in
     pending)
       fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" \

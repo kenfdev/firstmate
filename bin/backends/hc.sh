@@ -35,8 +35,9 @@
 # space with one tab each. Naming the space needs the app window and is not done.
 #
 # Measured limits on hc 0.1.13 and 0.1.14 (docs/hc-backend.md "Limits"):
-#   - `hc send` presses Enter after pasting. A visible empty composer and
-#     native idle condition guard typed delivery, but are not atomic together.
+#   - `hc send` presses Enter after pasting. When native idle is available, a
+#     visible empty composer and the idle condition guard typed delivery, but
+#     are not atomic together.
 #   - hc reports one foreground process per terminal (`foreground` in
 #     `hc get`), not a process group; when that process is a launcher,
 #     agent_state also reads the rest of its process group from local `ps`.
@@ -359,27 +360,42 @@ fm_backend_hc_composer_state() {  # <target> [expected-label] -> empty|pending|p
   printf '%s' "$verdict"
 }
 
-# hc has no literal paste, so guard its combined paste-and-submit with the
-# shared composer classifier and hc's native idle condition. The screen read
-# and send are separate operations; a concurrent draft can still race them.
+# hc has no literal paste. When it reports idle, guard its combined paste and
+# submit with the shared composer classifier and hc's native idle condition.
+# Other statuses use hc's ordinary send, as herdr does for non-Claude panes.
+# A screen read and send are separate; a concurrent draft can still race them.
 fm_backend_hc_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected=${6:-}
-  local wait_secs out rc started wait_status verdict
+  local wait_secs out rc started wait_status verdict json native
+  local -a idle_guard=()
   case "$retries" in ''|*[!0-9]*) retries=1 ;; esac
   case "$sleep_s" in ''|*[!0-9.]*) sleep_s=0.4 ;; esac
   case "$settle" in ''|*[!0-9.]*) settle=0 ;; esac
-  verdict=$(fm_backend_hc_composer_state "$target" "$expected")
-  if [ "$verdict" != empty ]; then
-    echo "error: hc composer is not confirmed empty (state=${verdict:-unknown})" >&2
-    printf 'send-failed'
-    return 0
+  fm_backend_hc_target_ready "$target" "$expected" || { printf 'send-failed'; return 0; }
+  json=$(fm_backend_hc_get "$target") || { printf 'send-failed'; return 0; }
+  native=$(printf '%s' "$json" | jq -r '.status.state // ""' 2>/dev/null) || { printf 'send-failed'; return 0; }
+  if [ "$native" = idle ]; then
+    verdict=$(fm_backend_hc_composer_state "$target" "$expected")
+    if [ "$verdict" != empty ]; then
+      echo "error: hc composer is not confirmed empty (state=${verdict:-unknown})" >&2
+      printf 'send-failed'
+      return 0
+    fi
+    idle_guard=(--if idle)
   fi
   fm_backend_hc_target_ready "$target" "$expected" || { printf 'send-failed'; return 0; }
   wait_secs=$(awk -v r="$retries" -v s="$sleep_s" 'BEGIN { v = r * s; if (v < 1) v = 1; printf "%d", (v == int(v) ? v : int(v) + 1) }' 2>/dev/null)
   case "$wait_secs" in ''|*[!0-9]*|0) wait_secs=1 ;; esac
   out=$(fm_backend_hc_cli "$FM_BACKEND_HC_SESSION" send --json "$FM_BACKEND_HC_ADDRESS" \
-    --if idle --wait --timeout "$wait_secs" -- "$text" 2>&1)
+    "${idle_guard[@]}" --wait --timeout "$wait_secs" -- "$text" 2>&1)
   rc=$?
+  if [ "$rc" -eq 10 ] && [ "${#idle_guard[@]}" -gt 0 ]; then
+    # hc's status-mismatch response proves the conditional send typed nothing.
+    fm_backend_hc_target_ready "$target" "$expected" || { printf 'send-failed'; return 0; }
+    out=$(fm_backend_hc_cli "$FM_BACKEND_HC_SESSION" send --json "$FM_BACKEND_HC_ADDRESS" \
+      --wait --timeout "$wait_secs" -- "$text" 2>&1)
+    rc=$?
+  fi
   case "$rc" in
     0) ;;
     9) echo "error: hc target is blocked; no text was sent" >&2; printf 'send-failed'; return 0 ;;

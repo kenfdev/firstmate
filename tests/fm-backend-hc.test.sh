@@ -57,6 +57,11 @@ case "$cmd" in
   rm) [ -e "$D/rm-sticks" ] || rm -f "$D/$last.json"; printf '{}\n' ;;
   read) cat "$D/screen" 2>/dev/null || printf 'screen of %s\n' "$last" ;;
   send)
+    if [ -f "$D/send.once" ]; then
+      rm -f "$D/send.once"
+      printf '{"error":{"kind":"status_mismatch"}}\n' >&2
+      exit 10
+    fi
     if [ -f "$D/send.exit" ]; then
       printf '{"error":{"kind":"%s"}}\n' "$(cat "$D/send.kind" 2>/dev/null || echo blocked)" >&2
       exit "$(cat "$D/send.exit")"
@@ -344,6 +349,7 @@ test_send_text_submit_requires_empty_idle_composer() {
   setup_case submit
   tag=$(hometag_of)
   write_terminal "$D" t1 live fm-a1 "$tag" codex /usr/bin/codex
+  jq '.status = {"state":"idle"}' "$D/t1.json" > "$D/t1.next" && mv "$D/t1.next" "$D/t1.json"
   printf '❯\n' > "$D/screen"
   : > "$D/log"
   out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>/dev/null)
@@ -353,6 +359,13 @@ test_send_text_submit_requires_empty_idle_composer() {
   out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>/dev/null)
   assert_equals "$out" send-failed "a native status mismatch must refuse input"
   rm -f "$D/send.exit"
+  : > "$D/send.once"
+  : > "$D/log"
+  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>/dev/null)
+  assert_equals "$out" empty "a status change must retry without an idle condition"
+  assert_equals "$(grep -c $'\x1fsend\x1f' "$D/log")" 2 "a status mismatch must make one fallback attempt"
+  assert_not_contains "$(grep $'\x1fsend\x1f' "$D/log" | sed -n '2p')" $'--if\x1fidle\x1f' \
+    "the fallback must not repeat the idle condition"
   printf '❯ draft\n' > "$D/screen"
   : > "$D/log"
   out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>/dev/null)
@@ -377,7 +390,25 @@ test_send_text_submit_requires_empty_idle_composer() {
   hc_shell '. "'"$FM_TEST_ROOT"'/bin/fm-task-inbox-lib.sh"; fm_task_inbox_ring hc fmtest:t1 "'"$D"'/t.inbox/001.msg" fm-a1' || rc=$?
   assert_equals "$rc" 0 "hc doorbell must reach an empty idle composer"
   assert_contains "$(cat "$D/log")" $'--if\x1fidle\x1f' "doorbell must require native idle"
-  pass "hc: delivery requires an empty composer and native idle"
+  jq 'del(.status)' "$D/t1.json" > "$D/t1.next" && mv "$D/t1.next" "$D/t1.json"
+  printf 'unrecognized screen\n' > "$D/screen"
+  : > "$D/log"
+  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>/dev/null)
+  assert_equals "$out" empty "a terminal without native status must still receive text"
+  assert_contains "$(cat "$D/log")" $'\x1fsend\x1f' "unreported status must use hc send"
+  assert_not_contains "$(cat "$D/log")" $'--if\x1fidle\x1f' "unreported status must not require idle"
+  : > "$D/log"
+  rc=0
+  hc_shell '. "'"$FM_TEST_ROOT"'/bin/fm-task-inbox-lib.sh"; fm_task_inbox_ring hc fmtest:t1 "'"$D"'/t.inbox/001.msg" fm-a1' || rc=$?
+  assert_equals "$rc" 0 "an unknown composer without native status must still receive a doorbell"
+  assert_contains "$(cat "$D/log")" $'\x1fsend\x1f' "the doorbell must be sent"
+  assert_not_contains "$(cat "$D/log")" $'--if\x1fidle\x1f' "the doorbell must not require unreported idle"
+  jq '.status = {"state":"working"}' "$D/t1.json" > "$D/t1.next" && mv "$D/t1.next" "$D/t1.json"
+  : > "$D/log"
+  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>/dev/null)
+  assert_equals "$out" empty "a working terminal must retain herdr-equivalent send behavior"
+  assert_not_contains "$(cat "$D/log")" $'--if\x1fidle\x1f' "working status must not require idle"
+  pass "hc: native idle uses a composer guard and unreported status still receives delivery"
 }
 
 test_send_delimiters_and_binary_socket_pins() {

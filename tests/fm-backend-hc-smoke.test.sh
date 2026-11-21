@@ -145,17 +145,11 @@ captured() { fm_backend_capture hc "$T" 50 "$LABEL" | grep -qx 'Smoke-Line-42'; 
 wait_for 10 captured || fail "capture did not show the submitted command's output"
 pass "hc smoke: send_text_line ran the command and capture shows its output"
 
-"$ROOT/bin/fm-hc-lab.sh" run "$SES" keys --json "$ADDR" -- s a f e d r a f t >/dev/null \
-  || fail "could not type the draft"
-before=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" read --lines 0 "$ADDR")
-assert_contains "$before" safedraft "the draft must be visible before the attempted delivery"
 verdict=$(fm_backend_hc_send_text_submit "$T" "echo Sub-Line-7" 1 0.4 0 "$LABEL" 2>/dev/null)
-assert_equals "$verdict" send-failed "unproven text delivery must be refused"
-after=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" read --lines 0 "$ADDR")
-assert_equals "$after" "$before" "the refused delivery must leave the draft unchanged"
-"$ROOT/bin/fm-hc-lab.sh" run "$SES" keys --json "$ADDR" -- ctrl+u >/dev/null \
-  || fail "could not clear the test draft"
-pass "hc smoke: unproven composer input is refused"
+[ "$verdict" != send-failed ] || fail "a terminal without native status must accept text"
+sub_captured() { fm_backend_capture hc "$T" 50 "$LABEL" | grep -qx 'Sub-Line-7'; }
+wait_for 10 sub_captured || fail "text was not delivered to the terminal without native status"
+pass "hc smoke: a terminal without native status receives text"
 
 fixture_out="$TMP_ROOT/supervisor-received"
 # shellcheck disable=SC2016 # The fixture shell expands its own positional arguments.
@@ -168,13 +162,24 @@ fixture_idle() {
   [ "$("$ROOT/bin/fm-hc-lab.sh" run "$SES" get --json "$fixture_addr" | jq -r '.status.state // empty')" = idle ]
 }
 wait_for 10 fixture_idle || fail "supervisor fixture did not report idle"
-mkdir -p "$FM_HOME/state"
-printf 'away\n' > "$FM_HOME/state/.afk"
-(
+fixture_inject() (
   export FM_SUPERVISOR_BACKEND=hc FM_SUPERVISOR_TARGET="$SES:$fixture_addr" FM_DAEMON_PRIMARY_HARNESS=codex
   . "$ROOT/bin/fm-supervise-daemon.sh"
   inject_msg 'hc smoke escalation' "$FM_HOME/state"
-) || fail "marked supervisor injection failed"
+)
+mkdir -p "$FM_HOME/state"
+printf 'away\n' > "$FM_HOME/state/.afk"
+"$ROOT/bin/fm-hc-lab.sh" run "$SES" keys --json "$fixture_addr" -- d r a f t >/dev/null \
+  || fail "could not type the fixture draft"
+before=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" read --lines 0 "$fixture_addr")
+assert_contains "$before" draft "the fixture draft must be visible"
+if fixture_inject; then fail "drafted supervisor must defer injection"; fi
+after=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" read --lines 0 "$fixture_addr")
+assert_equals "$after" "$before" "deferred injection must leave the draft unchanged"
+[ ! -e "$fixture_out" ] || fail "deferred injection must not submit the draft"
+"$ROOT/bin/fm-hc-lab.sh" run "$SES" keys --json "$fixture_addr" -- ctrl+u >/dev/null \
+  || fail "could not clear the fixture draft"
+fixture_inject || fail "marked supervisor injection failed"
 expected=$(printf '\342\201\243FIRSTMATE_OP: v1 away-supervisor: hc smoke escalation')
 assert_equals "$(cat "$fixture_out")" "$expected" "the supervisor must receive the complete marked escalation"
 rm -f "$FM_HOME/state/.afk"
