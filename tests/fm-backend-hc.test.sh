@@ -55,7 +55,7 @@ case "$cmd" in
     cat "$D/$last.json"
     ;;
   rm) [ -e "$D/rm-sticks" ] || rm -f "$D/$last.json"; printf '{}\n' ;;
-  read) printf 'screen of %s\n' "$last" ;;
+  read) cat "$D/screen" 2>/dev/null || printf 'screen of %s\n' "$last" ;;
   send)
     if [ -f "$D/send.exit" ]; then
       printf '{"error":{"kind":"%s"}}\n' "$(cat "$D/send.kind" 2>/dev/null || echo blocked)" >&2
@@ -339,17 +339,30 @@ test_container_ensure_gates_binary_version_and_generation() {
   pass "hc: container_ensure refuses a misnamed, old, or wrong-generation binary"
 }
 
-test_send_text_submit_refuses_unproven_input() {
+test_send_text_submit_requires_empty_idle_composer() {
   local tag out rc
   setup_case submit
   tag=$(hometag_of)
   write_terminal "$D" t1 live fm-a1 "$tag" codex /usr/bin/codex
+  printf '❯\n' > "$D/screen"
   : > "$D/log"
   out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>/dev/null)
-  assert_equals "$out" send-failed "unproven input must be refused"
+  assert_equals "$out" empty "an empty composer and started turn must confirm delivery"
+  assert_contains "$(cat "$D/log")" $'--if\x1fidle\x1f' "delivery must require native idle"
+  printf '10\n' > "$D/send.exit"
+  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>/dev/null)
+  assert_equals "$out" send-failed "a native status mismatch must refuse input"
+  rm -f "$D/send.exit"
+  printf '❯ draft\n' > "$D/screen"
+  : > "$D/log"
+  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>/dev/null)
+  assert_equals "$out" send-failed "a draft or unproven composer must be refused"
   if grep -q $'\x1fsend\x1f' "$D/log" || grep -q $'\x1fkeys\x1f' "$D/log"; then
     fail "refused input must not reach the terminal"
   fi
+  printf 'unrecognized screen\n' > "$D/screen"
+  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>/dev/null)
+  assert_equals "$out" send-failed "an unknown composer must be refused"
   mkdir -p "$D/t.inbox"
   printf 'message\n' > "$D/t.inbox/001.msg"
   rc=0
@@ -359,7 +372,12 @@ test_send_text_submit_refuses_unproven_input() {
   if grep -q $'\x1fsend\x1f' "$D/log" || grep -q $'\x1fkeys\x1f' "$D/log"; then
     fail "refused doorbell must not reach the terminal"
   fi
-  pass "hc: unproven composer input is refused without typing"
+  printf '❯\n' > "$D/screen"
+  rc=0
+  hc_shell '. "'"$FM_TEST_ROOT"'/bin/fm-task-inbox-lib.sh"; fm_task_inbox_ring hc fmtest:t1 "'"$D"'/t.inbox/001.msg" fm-a1' || rc=$?
+  assert_equals "$rc" 0 "hc doorbell must reach an empty idle composer"
+  assert_contains "$(cat "$D/log")" $'--if\x1fidle\x1f' "doorbell must require native idle"
+  pass "hc: delivery requires an empty composer and native idle"
 }
 
 test_send_delimiters_and_binary_socket_pins() {
@@ -379,6 +397,33 @@ test_send_delimiters_and_binary_socket_pins() {
   out=$(CASE_HC_BIN="$D/pinned/hc" hc_shell 'fm_backend_hc_bin')
   assert_equals "$out" "$D/pinned/hc" "FM_HC_BIN must win over an hc on PATH"
   pass "hc: send text is -- delimited, and FM_HC_BIN/FM_HC_SOCKET pin the call"
+}
+
+test_away_daemon_terminal_lifecycle() {
+  local tag out
+  setup_case away
+  tag=$(hometag_of)
+  write_terminal "$D" t1 live fm-a1 "$tag" codex /usr/bin/codex
+  write_terminal "$D" t9 live fm-afk-daemon "$tag" bash /bin/bash
+  printf '{"address":"t9"}\n' > "$D/run.json"
+  out=$(hc_shell '. "'"$FM_TEST_ROOT"'/bin/fm-afk-launch.sh"; FM_AFK_LAUNCH_ENTRY=/bin/true; fm_afk_launch_primary_harness() { printf codex; }; fm_afk_launch_create_hc fmtest:t1 hc') \
+    || fail "hc daemon launch failed: $out"
+  assert_equals "$(cat "$HOMEDIR/state/.afk-daemon-terminal")" $'hc\tfmtest:t9\tfm-afk-daemon' \
+    "the exact daemon terminal must be recorded"
+  assert_contains "$(cat "$D/log")" 'firstmate.task=fm-afk-daemon' "the daemon must have its own label"
+  assert_not_contains "$(cat "$D/log")" 'herdr.space=' "the daemon must not appear in the app"
+  hc_shell '. "'"$FM_TEST_ROOT"'/bin/fm-afk-launch.sh"; fm_afk_launch_record_read && fm_afk_launch_close_recorded' \
+    || fail "hc daemon close failed"
+  [ ! -e "$HOMEDIR/state/.afk-daemon-terminal" ] || fail "confirmed close must clear the record"
+  [ -f "$D/t1.json" ] || fail "daemon close must not remove the supervisor"
+  [ ! -f "$D/t9.json" ] || fail "daemon close must remove the recorded terminal"
+  printf '{"terminals":[{"address":"t9"}]}\n' > "$D/ls.json"
+  expect_refused hc_shell '. "'"$FM_TEST_ROOT"'/bin/fm-afk-launch.sh"; fm_afk_launch_create_hc fmtest:t1 hc'
+  printf '{}\n' > "$D/ls.json"
+  : > "$D/log"
+  expect_refused hc_shell '. "'"$FM_TEST_ROOT"'/bin/fm-afk-launch.sh"; fm_afk_launch_create_hc fmtest:t1 hc'
+  assert_not_contains "$(cat "$D/log")" $'\x1frun\x1f' "an invalid inventory must not create a daemon"
+  pass "hc: away daemon records and closes its own terminal and refuses an unrecorded duplicate"
 }
 
 test_required_tool_check_uses_the_adapter_resolver() {
@@ -456,5 +501,6 @@ fm_test_run \
   test_capture_and_current_path_read_the_recorded_terminal \
   test_endpoint_validation_binds_hc_meta \
   test_container_ensure_gates_binary_version_and_generation \
-  test_send_text_submit_refuses_unproven_input \
+  test_send_text_submit_requires_empty_idle_composer \
+  test_away_daemon_terminal_lifecycle \
   test_send_delimiters_and_binary_socket_pins

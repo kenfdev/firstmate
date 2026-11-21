@@ -157,6 +157,29 @@ assert_equals "$after" "$before" "the refused delivery must leave the draft unch
   || fail "could not clear the test draft"
 pass "hc smoke: unproven composer input is refused"
 
+fixture_out="$TMP_ROOT/supervisor-received"
+# shellcheck disable=SC2016 # The fixture shell expands its own positional arguments.
+fixture_json=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" run --json --bg --no-parent --no-notify \
+  /bin/bash -c 'printf "\033]7501;state=idle:app=fixture\033\\❯ "; IFS= read -r line; printf "%s" "$line" > "$1"; printf "\033]7501;state=working:app=fixture\033\\"; sleep 1; printf "\033]7501;state=idle:app=fixture\033\\\n❯ "; sleep 30' _ "$fixture_out") \
+  || fail "could not start the supervisor fixture"
+fixture_addr=$(printf '%s' "$fixture_json" | jq -r '.address // empty')
+[ -n "$fixture_addr" ] || fail "supervisor fixture has no address"
+fixture_idle() {
+  [ "$("$ROOT/bin/fm-hc-lab.sh" run "$SES" get --json "$fixture_addr" | jq -r '.status.state // empty')" = idle ]
+}
+wait_for 10 fixture_idle || fail "supervisor fixture did not report idle"
+mkdir -p "$FM_HOME/state"
+printf 'away\n' > "$FM_HOME/state/.afk"
+(
+  export FM_SUPERVISOR_BACKEND=hc FM_SUPERVISOR_TARGET="$SES:$fixture_addr" FM_DAEMON_PRIMARY_HARNESS=codex
+  . "$ROOT/bin/fm-supervise-daemon.sh"
+  inject_msg 'hc smoke escalation' "$FM_HOME/state"
+) || fail "marked supervisor injection failed"
+expected=$(printf '\342\201\243FIRSTMATE_OP: v1 away-supervisor: hc smoke escalation')
+assert_equals "$(cat "$fixture_out")" "$expected" "the supervisor must receive the complete marked escalation"
+rm -f "$FM_HOME/state/.afk"
+pass "hc smoke: idle supervisor receives a marked escalation"
+
 assert_equals "$(fm_backend_agent_state hc "$T")" dead "an idle shell is dead"
 STANDIN=$(fm_agent_standin "$TMP_ROOT/standin") || fail "no agent stand-in survives a foreign name here"
 mkdir -p "$TMP_ROOT/bin/claude"

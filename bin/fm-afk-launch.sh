@@ -100,7 +100,7 @@
 #                              only on a home that runs the host; exit 2 with one
 #                              line naming a live away record on that home.
 #
-# Supported backends: herdr, tmux, and rex for `start`; t3code only through
+# Supported backends: herdr, tmux, rex, and hc for `start`; t3code only through
 # `start-native` (T3 hosts no terminal to create, so the daemon runs as the
 # captain's own tracked background job, which means a Codex captain on t3code
 # has no away mode). Others (zellij, orca, cmux, paseo, tern) have no verified
@@ -440,6 +440,7 @@ fm_afk_launch_record_read() {
   case "$FM_AFK_REC_BACKEND" in
     herdr) [ -n "$extra" ] ;;
     rex) [ "${extra%%:*}" = session ] && [ "${FM_AFK_REC_TARGET%%:*}" = "${extra#session:}" ] ;;
+    hc) fm_backend_source hc && fm_backend_hc_parse_target "$FM_AFK_REC_TARGET" && [ "$extra" = fm-afk-daemon ] ;;
     tmux) : ;;
     none) [ "$FM_AFK_REC_TARGET" = - ] && [ "$extra" = native ] ;;
     *) return 2 ;;
@@ -460,6 +461,11 @@ fm_afk_launch_record_validate_if_present() {
 fm_afk_launch_close_terminal() {  # <backend> <target> [extra]
   local backend=$1 target=$2 extra=${3:-}
   case "$backend" in
+    hc)
+      fm_backend_source hc || return 1
+      [ "$extra" = fm-afk-daemon ] || return 1
+      fm_backend_hc_kill "$target" '' "$extra"
+      ;;
     rex)
       fm_backend_source rex || return 1
       [ "${extra%%:*}" = session ] || return 1
@@ -488,6 +494,10 @@ fm_afk_launch_close_terminal() {  # <backend> <target> [extra]
 fm_afk_launch_terminal_absent() {  # <backend> <target>
   local backend=$1 target=$2 session pane out result code
   case "$backend" in
+    hc)
+      fm_backend_source hc || return 1
+      [ "$(fm_backend_hc_endpoint_state "$target")" = absent ]
+      ;;
     rex)
       fm_backend_source rex || return 1
       [ "$(fm_backend_rex_block_presence "$target")" = missing ]
@@ -530,6 +540,10 @@ fm_afk_launch_close_recorded() {
 fm_afk_launch_terminal_alive() {  # <backend> <target>
   local backend=$1 target=$2 session pane
   case "$backend" in
+    hc)
+      fm_backend_source hc || return 1
+      fm_backend_hc_target_ready "$target" fm-afk-daemon
+      ;;
     rex)
       fm_backend_source rex || return 1
       fm_backend_rex_target_ready "$target"
@@ -708,6 +722,62 @@ fm_afk_launch_create_herdr() {  # <captain-target> <captain-backend>
   fm_afk_launch_log "daemon launched in non-visible herdr workspace $wsid (pane $session:$pane), supervising $captain_target"
 }
 
+fm_afk_launch_hc_find() {  # <session> <home-tag>
+  local out addresses
+  out=$(fm_backend_hc_cli "$1" ls --json --label firstmate.task=fm-afk-daemon \
+    --label "firstmate.home=$2" 2>/dev/null) || return 1
+  addresses=$(printf '%s' "$out" | jq -er '
+    if (.terminals | type) != "array" then error("invalid terminal list")
+    else [.terminals[].address] | if all(.[]; type == "string" and length > 0)
+      then join("\n") else error("invalid terminal address") end end' 2>/dev/null) || return 1
+  [ -z "$addresses" ] || fm_backend_hc_address_valid "$addresses" || return 1
+  printf '%s' "$addresses"
+}
+
+# A daemon terminal has no herdr.space label, so it stays out of the app view.
+fm_afk_launch_create_hc() {  # <captain-target> <captain-backend>
+  local captain_target=$1 captain_backend=$2 session home found out address target cmd pins='' rc=0
+  fm_backend_source hc || return 1
+  fm_backend_hc_target_ready "$captain_target" || return 1
+  session=$FM_BACKEND_HC_SESSION
+  home=$(fm_backend_hometag)
+  found=$(fm_afk_launch_hc_find "$session" "$home") || {
+    fm_afk_launch_log "cannot check for an existing hc daemon terminal"
+    return 1
+  }
+  if [ -n "$found" ]; then
+    fm_afk_launch_log "an unrecorded hc daemon terminal already exists at $session:$found; refusing another"
+    return 1
+  fi
+  cmd=$(fm_afk_launch_daemon_cmd "$captain_target" "$captain_backend")
+  if [ -n "${FM_HC_BIN:-}" ]; then
+    printf -v pins 'export FM_HC_BIN=%q; ' "$FM_HC_BIN"
+  fi
+  if [ -n "${FM_HC_SOCKET:-}" ]; then
+    printf -v pins '%sexport FM_HC_SOCKET=%q; ' "$pins" "$FM_HC_SOCKET"
+  fi
+  cmd="$pins$cmd"
+  out=$(fm_backend_hc_cli "$session" run --bg --json --no-parent --outlive-parent --no-notify \
+    --cwd "$FM_HOME" --label firstmate.task=fm-afk-daemon --label "firstmate.home=$home" \
+    /bin/bash -c "$cmd" 2>&1) || rc=$?
+  address=$(printf '%s' "$out" | jq -r '.address // empty' 2>/dev/null)
+  if [ "$rc" -ne 0 ] || ! fm_backend_hc_address_valid "$address"; then
+    address=$(fm_afk_launch_hc_find "$session" "$home") || address=
+    if ! fm_backend_hc_address_valid "$address"; then
+      fm_afk_launch_log "hc daemon creation did not return a recoverable exact terminal id"
+      return 1
+    fi
+  fi
+  target="$session:$address"
+  if ! fm_afk_launch_record_write hc "$target" fm-afk-daemon; then
+    fm_afk_launch_log "failed to persist hc daemon terminal record; closing $target"
+    fm_afk_launch_close_terminal hc "$target" fm-afk-daemon || true
+    return 1
+  fi
+  fm_afk_launch_commit_terminal hc "$target" fm-afk-daemon 1 || return 1
+  fm_afk_launch_log "daemon launched in hc terminal $target, supervising $captain_target"
+}
+
 # Launch the daemon in a dedicated Rex session of its own (never a tab in the
 # captain's session), recorded by exact ids before the daemon command is typed
 # into its shell, mirroring the herdr create-record-run order.
@@ -831,8 +901,9 @@ fm_afk_launch_start() {
       herdr) fm_afk_launch_create_herdr "$captain_target" "$captain_backend"; result=$? ;;
       tmux)  fm_afk_launch_create_tmux "$captain_target" "$captain_backend"; result=$? ;;
       rex)   fm_afk_launch_create_rex "$captain_target" "$captain_backend"; result=$? ;;
+      hc)    fm_afk_launch_create_hc "$captain_target" "$captain_backend"; result=$? ;;
       *)
-        fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux, rex)"
+        fm_afk_launch_log "no non-visible daemon-launch primitive for backend '$captain_backend' yet (supported: herdr, tmux, rex, hc)"
         result=1
         ;;
     esac

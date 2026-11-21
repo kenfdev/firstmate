@@ -55,7 +55,7 @@ Auto-detected hc spawns carry the same `herdr.space`/`herdr.tab` labels an expli
 The app is local GUI presentation only; detection reads the terminal's core-side label without requiring a live app window, so a surviving labeled terminal can still select hc after the GUI closes.
 Nothing here changes the remote `herdr` path.
 
-Away-mode supervisor discovery and hc refusal are owned by [Away-mode supervisor backend](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target).
+Away-mode supervisor discovery is owned by [Away-mode supervisor backend](configuration.md#away-mode-supervisor-backend-fm_supervisor_backend--fm_supervisor_target).
 
 ## Task shape and metadata
 
@@ -94,20 +94,28 @@ An input, capture, or close that carries the task label refuses a terminal whose
 | Capture | `hc read --lines <n>` |
 | Visible capture | `hc read --lines 0` |
 | Send a line and submit | `hc send` |
-| Submit with confirmation | Refused until input can be verified before Enter |
+| Submit with confirmation | Classify the visible composer, then `hc send --if idle --wait` |
 | Named key | `hc keys` |
 | Current path | `hc get`, the foreground process's `cwd` |
 | Busy state | `hc get`, native `status.state` (`working` is busy) |
 | Agent state | `hc get`, the foreground process and its process group, through the shared classifier |
 | Close | `hc kill`, then `hc rm`, then `hc get` must answer not found |
 
+## Away and quiet supervision
+
+The away daemon runs in its own hc terminal without Herdr app presentation labels.
+Firstmate records its exact terminal and closes only that terminal when the daemon stops.
+The daemon uses the same composer and idle guards for marked supervisor input as task delivery.
+
 ## Limits
 
 - `hc send` always presses Enter, and `hc keys` cannot type arbitrary Unicode text.
   `bin/fm-spawn.sh` pastes and submits the spawn launch line with `hc send` and consumes the Enter that follows it.
-- Firstmate refuses verified text delivery and inbox doorbells on hc because it cannot prove the input before Enter.
-  Steers remain in the task inbox, and the watcher reports the undelivered doorbell.
-  Away and quiet supervisor injection remains unsupported.
+- Firstmate sends a message or inbox doorbell only when the visible composer is confirmed empty and hc reports the target idle.
+  Unknown or pending composers and terminals without an idle status refuse delivery, retaining the task inbox record.
+  The screen read and `hc send` are separate, so a draft can appear between them.
+  Away and quiet escalations stay buffered when the supervisor has no reported idle status or the composer cannot be classified.
+
 - hc reports one foreground process per terminal.
   When that process is a launcher, the adapter also reads the rest of its process group from `ps`, which works only for terminals on the local machine.
 - Right after a terminal starts, `hc get` can report no foreground process yet, and agent state reads `unreadable` until the shell is up.

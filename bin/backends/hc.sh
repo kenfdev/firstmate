@@ -35,8 +35,8 @@
 # space with one tab each. Naming the space needs the app window and is not done.
 #
 # Measured limits on hc 0.1.13 and 0.1.14 (docs/hc-backend.md "Limits"):
-#   - `hc send` presses Enter after pasting, without an opportunity to prove
-#     the composer payload. Typed delivery is refused until it can be proven.
+#   - `hc send` presses Enter after pasting. A visible empty composer and
+#     native idle condition guard typed delivery, but are not atomic together.
 #   - hc reports one foreground process per terminal (`foreground` in
 #     `hc get`), not a process group; when that process is a launcher,
 #     agent_state also reads the rest of its process group from local `ps`.
@@ -359,11 +359,42 @@ fm_backend_hc_composer_state() {  # <target> [expected-label] -> empty|pending|p
   printf '%s' "$verdict"
 }
 
-# hc send submits before Firstmate can prove what reached the composer.
-# Keep typed deliveries unproven until hc exposes a safe input path.
+# hc has no literal paste, so guard its combined paste-and-submit with the
+# shared composer classifier and hc's native idle condition. The screen read
+# and send are separate operations; a concurrent draft can still race them.
 fm_backend_hc_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  echo "error: hc cannot safely verify composer input before submission" >&2
-  printf 'send-failed'
+  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 expected=${6:-}
+  local wait_secs out rc started wait_status verdict
+  case "$retries" in ''|*[!0-9]*) retries=1 ;; esac
+  case "$sleep_s" in ''|*[!0-9.]*) sleep_s=0.4 ;; esac
+  case "$settle" in ''|*[!0-9.]*) settle=0 ;; esac
+  verdict=$(fm_backend_hc_composer_state "$target" "$expected")
+  if [ "$verdict" != empty ]; then
+    echo "error: hc composer is not confirmed empty (state=${verdict:-unknown})" >&2
+    printf 'send-failed'
+    return 0
+  fi
+  fm_backend_hc_target_ready "$target" "$expected" || { printf 'send-failed'; return 0; }
+  wait_secs=$(awk -v r="$retries" -v s="$sleep_s" 'BEGIN { v = r * s; if (v < 1) v = 1; printf "%d", (v == int(v) ? v : int(v) + 1) }' 2>/dev/null)
+  case "$wait_secs" in ''|*[!0-9]*|0) wait_secs=1 ;; esac
+  out=$(fm_backend_hc_cli "$FM_BACKEND_HC_SESSION" send --json "$FM_BACKEND_HC_ADDRESS" \
+    --if idle --wait --timeout "$wait_secs" -- "$text" 2>&1)
+  rc=$?
+  case "$rc" in
+    0) ;;
+    9) echo "error: hc target is blocked; no text was sent" >&2; printf 'send-failed'; return 0 ;;
+    10) echo "error: hc target is not idle; no text was sent" >&2; printf 'send-failed'; return 0 ;;
+    3|11) printf 'send-failed'; return 0 ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  started=$(printf '%s' "$out" | jq -r '.started // empty' 2>/dev/null)
+  wait_status=$(printf '%s' "$out" | jq -r '.wait.status // empty' 2>/dev/null)
+  if [ "$started" = true ] || [ "$wait_status" = working ]; then
+    printf 'empty'
+    return 0
+  fi
+  [ "$settle" = 0 ] || sleep "$settle"
+  fm_backend_hc_composer_state "$target" "$expected"
 }
 
 # fm_backend_hc_busy_state: hc's native agent status. `working` is busy; the

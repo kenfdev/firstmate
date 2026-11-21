@@ -3687,8 +3687,14 @@ The default socket path under the scratchpad temp directory exceeded the 103-byt
 
 On 2026-11-21, hc 0.1.21 in a private `fm-hc-lab.sh` session received `keys --json t2 -- d r a f t` followed by `send --json t2 -- INJECTED` into a Python line reader with no reported agent status.
 The screen showed `RECEIVED='draftINJECTED\n'`: the send submitted the existing draft together with the new text.
-With a second draft in the same lab terminal, `fm_backend_hc_send_text_submit` returned `send-failed` and the screen stayed unchanged.
-The terminal had no reported native agent status, so this result does not establish how `--if idle` behaves for an agent that reports idle.
+With a second draft in the same lab terminal, `hc send --if idle` returned status mismatch without typing because that terminal reported no agent status.
+This does not establish how `--if idle` behaves for an agent that reports idle.
+The same lab used `fm_afk_launch_create_hc` to start a 30-second placeholder in its own unlabeled-for-presentation terminal, recorded its exact address, and `fm_afk_launch_close_recorded` removed that terminal while leaving the supervisor terminal present.
+The portable lifecycle regression is `tests/fm-backend-hc.test.sh`.
+An OSC 7501 idle-reporting fixture in the same hc 0.1.21 lab received the U+2063 `away-supervisor` envelope and body through `inject_msg`; the call returned 0 with verdict `empty`, and hc reported turn 1.
+With a draft typed into the fixture, `inject_msg` deferred before attempting submission.
+This fixture verifies hc transport and the daemon function, not a vendor harness or a complete daemon session.
+The current live guard is `tests/fm-backend-hc-smoke.test.sh`.
 
 ### Adapter lifecycle
 
@@ -3705,7 +3711,7 @@ ok - hc smoke: secondmate hooks update the parent busy state
 ```
 
 `tests/fm-backend-hc-smoke.test.sh` passed inside a `bin/fm-hc-lab.sh` session (hc 0.1.14, 2026-10-30): an `fm-hclab-*` core with scratch XDG roots, a pinned `FM_HC_SOCKET`, and a fleet-state tripwire that verified the recorded real-core file metadata inventory unchanged afterward.
-The historical submit result below predates the current refusal of unproven text delivery.
+The historical submit result below predates the current composer and idle guards.
 Teardown swept the session's `serve`/`hold` daemons by their `HC_SESSION` env token.
 
 ```text
