@@ -356,14 +356,14 @@ fm_control_backend_supports_key() {  # <backend> <key>
 }
 
 # Whether <backend> has a recovery-grade agent-state classifier. tmux, herdr,
-# rex, and t3code implement fm_backend_agent_state; zellij, orca, cmux, and paseo report
+# rex, t3code, and hc implement fm_backend_agent_state; zellij, orca, cmux, and paseo report
 # `unverified`, and tern's `tern process` classifier answers for display but is
 # not promoted to this list, so no reading of theirs can prove an agent stopped.
 # The control plane refuses a stop-proving verb there instead of reporting an
 # unprovable transition as success.
 fm_control_backend_state_verified() {  # <backend>
   case "${1-}" in
-    tmux|herdr|rex|t3code) return 0 ;;
+    tmux|herdr|rex|t3code|hc) return 0 ;;
   esac
   return 1
 }
@@ -391,7 +391,7 @@ fm_control_backend_exit_supported() {  # <backend>
 # fm_control_backend_state_verified first.
 fm_control_backend_relaunch_supported() {  # <backend>
   case "${1-}" in
-    tmux|herdr|rex) return 0 ;;
+    tmux|herdr|rex|hc) return 0 ;;
   esac
   return 1
 }
@@ -453,6 +453,9 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 #     on the verified server, while an unreachable server reads `unreadable`.
 #     The proof re-reads the thread, but exit and relaunch refuse before it:
 #     V2 has no session stop and a thread cannot host a replacement.
+#   hc rechecks a secondmate's recorded terminal and its home/task labels.
+#     An absent or finished terminal is gone; its replacement belongs to the
+#     secondmate recovery path. Other task kinds cannot rebind through hc.
 #   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
 #     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
 #     carry the endpoint's socket identity - so a different but running server
@@ -499,6 +502,29 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
         alive) printf 'alive\t' ;;
         missing) printf 'gone\t' ;;
         *) printf 'unproven\tthe T3 server could not be reached to re-read thread %s' "$target" ;;
+      esac
+      ;;
+    hc)
+      # Secondmate recovery owns replacement of a finished or absent terminal.
+      # Recheck its task and home labels before treating a retained finished
+      # terminal as gone; a foreign or unreadable endpoint proves nothing.
+      if [ "$(fm_meta_get "$meta" kind)" != secondmate ]; then
+        printf 'unproven\thc endpoint rebind is not verified for this task kind'
+        return 0
+      fi
+      local id
+      id=$(fm_meta_get "$meta" endpoint_task_id)
+      [ -n "$id" ] || { printf 'unproven\thc task binding is missing'; return 0; }
+      case "$(fm_backend_hc_endpoint_state "$target" "fm-$id")" in
+        absent|finished) printf 'gone\t' ;;
+        ready)
+          case "$(fm_backend_hc_agent_state "$target")" in
+            dead) printf 'dead\t' ;;
+            alive) printf 'alive\t' ;;
+            *) printf 'unproven\tthe hc terminal changed or could not be classified during its recheck' ;;
+          esac
+          ;;
+        *) printf 'unproven\tthe hc terminal is foreign or could not be read' ;;
       esac
       ;;
     *)

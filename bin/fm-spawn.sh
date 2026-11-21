@@ -145,7 +145,7 @@
 #   top-level shell into it, because a restart restores that shell's cwd.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
-#   absent backend= means tmux. Orca, cmux, paseo, tern, and hc do not support
+#   absent backend= means tmux. Orca, cmux, paseo, and tern do not support
 #   --secondmate spawns.
 #   A rex crewmate or scout opens one tab in the Rex session the launching
 #   firstmate runs in when it runs directly inside Rex, otherwise in its home's
@@ -2409,10 +2409,6 @@ if [ "$RELAUNCH" -eq 0 ]; then
     echo "error: backend=tern does not support --secondmate spawns yet" >&2
     exit 1
   fi
-  if [ "$BACKEND" = hc ] && [ "$KIND" = secondmate ]; then
-    echo "error: backend=hc does not support --secondmate spawns yet" >&2
-    exit 1
-  fi
   fm_backend_runtime_check "$BACKEND" || exit 1
   if [ "$BACKEND" = rex ]; then
     fm_backend_rex_local_server_ensure || exit 1
@@ -2514,7 +2510,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # endpoint was DESTROYED" with "the endpoint is UNREACHABLE from here right
   # now", and an unreachable endpoint can still hold the live agent this
   # relaunch would duplicate. So absence is PROVEN before it may rebind, never
-  # inferred from a failed read - and only HERDR and REX can prove it:
+  # inferred from a failed read - only HERDR and REX permit task rebind:
   #   herdr - the recorded session's server is started, and the recorded pane is
   #           RE-READ through that session's own socket. `dead` means the pane
   #           survived the restart and is adopted after all; `alive` means the
@@ -2532,6 +2528,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   #           from "on a server I cannot see". A tmux `missing` therefore stays
   #           as deadlocked as it was before this change - deliberately, and
   #           with the reason stated rather than guessed past.
+  #   hc    - proves a secondmate terminal gone, but its separate recovery
+  #           path owns replacement; other task kinds cannot rebind.
   # Every transient or self-contradicting read stays `unreadable`/`ambiguous`
   # and refuses as it always did (bin/fm-backend.sh's fm_backend_agent_state
   # owns that vocabulary). The proof itself lives in one place for the whole
@@ -4981,6 +4979,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     T=$RELAUNCH_TARGET
     WT_TARGET=$T
     SES=${T%%:*}
+    if [ "$BACKEND" = hc ]; then
+      HC_SES=${T%%:*}
+      HC_TERMINAL=${T#*:}
+    fi
   elif [ "$BACKEND" = rex ]; then
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the

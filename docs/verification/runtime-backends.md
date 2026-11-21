@@ -3687,6 +3687,18 @@ The default socket path under the scratchpad temp directory exceeded the 103-byt
 
 ### Adapter lifecycle
 
+On 2026-11-21, hc 0.1.21 on Linux ran the secondmate lifecycle in a lab core with token-free harness stand-ins.
+The smoke fixture exercises the commands below through `tests/fm-backend-hc-smoke.test.sh`; the lab was retained for its owner instead of running teardown in this session.
+The Claude hook events were driven by the fixture, not by a real model turn.
+
+```text
+interrupt-delivered mate harness=codex backend=hc verified=agent-alive cancel=unconfirmed
+stopped mate harness=codex backend=hc endpoint=fm-hclab-smoke-905297-10353:t2 worktree=/tmp/fm-backend-hc-smoke.lPFxDB/mate-home
+relaunched mate harness=codex from=codex model=default effort=default backend=hc endpoint=fm-hclab-smoke-905297-10353:t2 worktree=/tmp/fm-backend-hc-smoke.lPFxDB/mate-home
+ok - hc smoke: secondmate spawn, control, relaunch and recovery
+ok - hc smoke: secondmate hooks update the parent busy state
+```
+
 `tests/fm-backend-hc-smoke.test.sh` passed inside a `bin/fm-hc-lab.sh` session (hc 0.1.14, 2026-10-30): an `fm-hclab-*` core with scratch XDG roots, a pinned `FM_HC_SOCKET`, and a fleet-state tripwire that verified the recorded real-core file metadata inventory unchanged afterward.
 Teardown swept the session's `serve`/`hold` daemons by their `HC_SESSION` env token.
 

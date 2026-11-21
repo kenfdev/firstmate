@@ -42,6 +42,17 @@ export FM_HC_BIN=$HC_BIN
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-hc-smoke)
 
+# Keep the core's login shells independent of the operator's shell startup.
+mkdir -p "$TMP_ROOT/bin"
+cat > "$TMP_ROOT/bin/lab-shell" <<'SH'
+#!/bin/sh
+exec /bin/bash --noprofile --norc -i
+SH
+chmod +x "$TMP_ROOT/bin/lab-shell"
+export SHELL="$TMP_ROOT/bin/lab-shell"
+export PATH="$TMP_ROOT/bin:/usr/bin:/bin:$PATH"
+export FM_HC_MATE_TEST_LOG="$TMP_ROOT/mate-launch.log"
+
 HC_TEST_SES=$("$ROOT/bin/fm-hc-lab.sh" name smoke)
 
 # The teardown's own result propagates: a fleet-tripwire failure or surviving
@@ -221,4 +232,128 @@ REC=$(fm_backend_wait_transition hc "$SES" 5 "$STATE" "$SES:$PANE") || fail "rec
 [ "$(fm_transition_pane_id "$REC")" = "$PANE" ] || fail "reconnected snapshot names the wrong terminal"
 [ "$(fm_transition_to_status "$REC")" = blocked ] || fail "reconnected snapshot is not blocked"
 pass "hc smoke: dropped stream falls back and reconnect snapshot finds blocked state"
+
+# A real core plus a token-free stand-in exercises the secondmate path, its
+# control plane, and the same liveness recovery used by the supervisor.
+if command -v cc >/dev/null 2>&1; then
+  cat > "$TMP_ROOT/stub.c" <<'C'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <termios.h>
+#include <unistd.h>
+int main(void) {
+  struct termios old, raw;
+  char c, line[1024], cwd[4096];
+  size_t n = 0;
+  FILE *log;
+  if (!isatty(0)) return 0;
+  if (!getcwd(cwd, sizeof cwd)) return 1;
+  log = fopen(getenv("FM_HC_MATE_TEST_LOG"), "a");
+  if (!log) return 1;
+  fprintf(log, "%s\t%s\n", getenv("FM_HOME"), cwd);
+  fclose(log);
+  if (tcgetattr(0, &old)) return 1;
+  raw = old;
+  raw.c_lflag &= ~(ICANON | ECHO);
+  tcsetattr(0, TCSANOW, &raw);
+  puts("›");
+  fflush(stdout);
+  while (read(0, &c, 1) == 1) {
+    if (c == 27) continue;
+    if (c == 13 || c == 10) {
+      line[n] = 0;
+      if (!strcmp(line, "/quit")) break;
+      n = 0;
+      puts("›");
+      fflush(stdout);
+    } else if (n < sizeof(line) - 1) line[n++] = c;
+  }
+  tcsetattr(0, TCSANOW, &old);
+  return 0;
+}
+C
+  cc -o "$TMP_ROOT/bin/codex" "$TMP_ROOT/stub.c" || fail "could not build the token-free harness stand-in"
+  cp "$TMP_ROOT/bin/codex" "$TMP_ROOT/bin/claude"
+  MATE_PARENT="$TMP_ROOT/mate-parent"
+  MATE_HOME="$TMP_ROOT/mate-home"
+  mkdir -p "$MATE_PARENT/state" "$MATE_PARENT/data" "$MATE_PARENT/config" "$MATE_HOME/bin" "$MATE_HOME/data" "$MATE_HOME/state"
+  printf 'mate\n' > "$MATE_HOME/.fm-secondmate-home"
+  printf '# fixture\n' > "$MATE_HOME/AGENTS.md"
+  printf 'charter\n' > "$MATE_HOME/data/charter.md"
+  git -C "$MATE_HOME" init -q
+  git -C "$MATE_HOME" add AGENTS.md
+  git -C "$MATE_HOME" -c user.name=Test -c user.email=test@example.invalid commit -qm initial
+  printf 'codex\n' > "$MATE_PARENT/config/secondmate-harness"
+  export FM_HOME="$MATE_PARENT" FM_ROOT="$ROOT" FM_ROOT_OVERRIDE="$ROOT" FM_BACKEND=hc
+  export FM_SKIP_SECONDMATE_SYNC=1 FM_SKIP_SECONDMATE_INHERIT=1 FM_SPAWN_NO_GUARD=1
+  "$ROOT/bin/fm-spawn.sh" mate "$MATE_HOME" "$TMP_ROOT/bin/codex stub" --secondmate || fail "hc secondmate spawn failed"
+  MATE_META="$MATE_PARENT/state/mate.meta"
+  MATE_TARGET=$(fm_backend_target_of_meta "$MATE_META")
+  mate_alive() { [ "$(fm_backend_agent_state hc "$MATE_TARGET")" = alive ]; }
+  wait_for 20 mate_alive || fail "secondmate did not start in its recorded hc terminal"
+  assert_equals "$(fm_backend_hc_endpoint_state "$MATE_TARGET" fm-mate)" ready "secondmate endpoint belongs to the launching home"
+  grep -Fx "$(printf '%s\t%s' "$MATE_HOME" "$MATE_HOME")" "$FM_HC_MATE_TEST_LOG" >/dev/null || fail "secondmate did not run in its own home"
+  grep -qx 'kind=secondmate' "$MATE_META" || fail "secondmate kind was not recorded"
+  grep -qx "home=$MATE_HOME" "$MATE_META" || fail "secondmate home was not recorded"
+  "$ROOT/bin/fm-control.sh" mate interrupt || fail "hc secondmate interrupt failed"
+  "$ROOT/bin/fm-control.sh" mate exit || fail "hc secondmate exit failed"
+  assert_equals "$(fm_backend_agent_state hc "$MATE_TARGET")" dead "exit leaves the terminal and stops the agent"
+  "$ROOT/bin/fm-control.sh" mate relaunch || fail "hc secondmate relaunch failed"
+  wait_for 20 mate_alive || fail "relaunch did not start a replacement"
+  assert_equals "$(fm_backend_target_of_meta "$MATE_META")" "$MATE_TARGET" "relaunch preserves the endpoint"
+
+  fm_backend_hc_parse_target "$MATE_TARGET" || fail "invalid secondmate target"
+  "$ROOT/bin/fm-hc-lab.sh" run "$HC_TEST_SES" kill "$FM_BACKEND_HC_ADDRESS" --json >/dev/null || fail "could not finish fixture terminal"
+  out=$("$ROOT/bin/fm-control.sh" mate exit) || fail "control did not recognize a finished secondmate: $out"
+  case "$out" in *endpoint-gone*) ;; *) fail "finished endpoint returned $out" ;; esac
+  export FM_ROOT="$ROOT" STATE="$MATE_PARENT/state"
+  # shellcheck source=bin/fm-secondmate-liveness-lib.sh
+  . "$ROOT/bin/fm-secondmate-liveness-lib.sh"
+  fm_sm_live_require_locks
+  fm_secondmate_liveness_lock mate || fail "could not lock secondmate recovery"
+  fm_secondmate_liveness_probe "$MATE_META" mate full
+  assert_equals "$FM_SM_LIVE_STATUS:$FM_SM_LIVE_STATE" relaunchable:missing "finished terminal is recoverable"
+  fm_secondmate_liveness_relaunch "$MATE_META" mate || fail "secondmate recovery failed: $FM_SM_LIVE_OUT"
+  fm_secondmate_liveness_unlock mate
+  OLD_TARGET=$MATE_TARGET
+  MATE_TARGET=$(fm_backend_target_of_meta "$MATE_META")
+  [ "$MATE_TARGET" != "$OLD_TARGET" ] || fail "recovery did not publish a replacement endpoint"
+  wait_for 20 mate_alive || fail "recovered secondmate did not start"
+  "$ROOT/bin/fm-control.sh" mate exit || fail "could not stop recovered fixture agent"
+  fm_secondmate_liveness_lock mate || fail "could not lock dead-shell recovery"
+  fm_secondmate_liveness_probe "$MATE_META" mate full
+  assert_equals "$FM_SM_LIVE_STATUS:$FM_SM_LIVE_STATE:$FM_SM_LIVE_KILL" relaunchable:dead:1 "dead shell needs replacement"
+  fm_secondmate_liveness_relaunch "$MATE_META" mate || fail "dead-shell recovery failed: $FM_SM_LIVE_OUT"
+  fm_secondmate_liveness_unlock mate
+  OLD_TARGET=$MATE_TARGET
+  MATE_TARGET=$(fm_backend_target_of_meta "$MATE_META")
+  [ "$MATE_TARGET" != "$OLD_TARGET" ] || fail "dead-shell recovery did not replace the endpoint"
+  wait_for 20 mate_alive || fail "dead-shell recovery did not start an agent"
+  assert_equals "$(fm_backend_hc_endpoint_state "$OLD_TARGET")" absent "dead-shell recovery removed the old terminal"
+  pass "hc smoke: secondmate spawn, control, relaunch and recovery"
+
+  CLAUDE_HOME="$TMP_ROOT/claude-home"
+  mkdir -p "$CLAUDE_HOME/bin" "$CLAUDE_HOME/data" "$CLAUDE_HOME/state" "$TMP_ROOT/claude-config"
+  printf 'hooks\n' > "$CLAUDE_HOME/.fm-secondmate-home"
+  printf '# fixture\n' > "$CLAUDE_HOME/AGENTS.md"
+  printf 'charter\n' > "$CLAUDE_HOME/data/charter.md"
+  git -C "$CLAUDE_HOME" init -q
+  git -C "$CLAUDE_HOME" add AGENTS.md
+  git -C "$CLAUDE_HOME" -c user.name=Test -c user.email=test@example.invalid commit -qm initial
+  export CLAUDE_CONFIG_DIR="$TMP_ROOT/claude-config"
+  "$ROOT/bin/fm-spawn.sh" hooks "$CLAUDE_HOME" claude --secondmate || fail "Claude fixture spawn failed"
+  # shellcheck source=bin/fm-busy-lib.sh
+  . "$ROOT/bin/fm-busy-lib.sh"
+  SETTINGS="$STATE/hooks.claude-settings.json"
+  for hook in Stop UserPromptSubmit; do
+    command=$(jq -r ".hooks.${hook}[0].hooks[0].command" "$SETTINGS")
+    bash -c "$command" || fail "$hook fixture hook failed"
+    verdict=$(fm_busy_classify_meta "$STATE/hooks.meta" hooks "$STATE")
+    case "$hook:$verdict" in Stop:'idle claude-hook'|UserPromptSubmit:'busy claude-hook') ;; *) fail "$hook classified $verdict" ;; esac
+  done
+  pass "hc smoke: secondmate hooks update the parent busy state"
+else
+  echo "skip: cc not found (hc secondmate lifecycle stand-in)"
+fi
 echo FM_TEST_COMPLETE

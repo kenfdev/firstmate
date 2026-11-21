@@ -165,6 +165,42 @@ test_control_interrupt_delivers_the_harness_keys() {
   pass "hc: fm-control interrupt delivers the harness's interrupt key"
 }
 
+test_control_exit_accepts_a_proven_dead_secondmate() {
+  local tag out rc=0 id=hcexit1
+  setup_case exit
+  tag=$(hometag_of)
+  write_terminal "$D" t2 live "fm-$id" "$tag" bash bash
+  mkdir -p "$HOMEDIR/state" "$HOMEDIR/data"
+  cat > "$HOMEDIR/state/$id.meta" <<EOF
+window=fmtest:t2
+endpoint_task_id=$id
+worktree=$D
+project=$D
+home=$D
+kind=secondmate
+harness=codex
+backend=hc
+hc_session=fmtest
+hc_terminal=t2
+EOF
+  out=$(FAKE_HC_DIR=$D PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$HOMEDIR \
+    FM_STATE_OVERRIDE="$HOMEDIR/state" FM_DATA_OVERRIDE="$HOMEDIR/data" \
+    "$FM_TEST_ROOT/bin/fm-control.sh" "$id" exit 2>&1) || rc=$?
+  expect_code 0 "$rc" "exit should accept a proven stopped hc secondmate"$'\n'"$out"
+  assert_contains "$out" 'already-stopped' "exit must report the observed state"
+  assert_not_contains "$(cat "$D/log")" $'\x1fsend\x1f' "exit must not type into the shell"
+  write_terminal "$D" t2 finished "fm-$id" "$tag" bash bash
+  out=$(FAKE_HC_DIR=$D PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$HOMEDIR \
+    FM_STATE_OVERRIDE="$HOMEDIR/state" FM_DATA_OVERRIDE="$HOMEDIR/data" \
+    "$FM_TEST_ROOT/bin/fm-control.sh" "$id" exit 2>&1) || fail "exit should recognize a finished hc terminal: $out"
+  assert_contains "$out" 'endpoint-gone' "exit must distinguish a finished endpoint"
+  write_terminal "$D" t2 finished fm-other "$tag" bash bash
+  expect_refused env FAKE_HC_DIR="$D" PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FM_HOME="$HOMEDIR" FM_ROOT_OVERRIDE="$HOMEDIR" \
+    FM_STATE_OVERRIDE="$HOMEDIR/state" FM_DATA_OVERRIDE="$HOMEDIR/data" \
+    "$FM_TEST_ROOT/bin/fm-control.sh" "$id" exit
+  pass "hc: control exit accepts a proven stopped secondmate without sending input"
+}
+
 test_foreign_or_unlabeled_terminal_gets_no_input_and_no_close() {
   local tag
   setup_case foreign
@@ -414,6 +450,7 @@ fm_test_run \
   test_required_tool_check_uses_the_adapter_resolver \
   test_create_task_is_independent_labeled_and_refuses_duplicates \
   test_control_interrupt_delivers_the_harness_keys \
+  test_control_exit_accepts_a_proven_dead_secondmate \
   test_foreign_or_unlabeled_terminal_gets_no_input_and_no_close \
   test_invalid_session_never_reaches_hc \
   test_inherited_socket_never_overrides_the_session \
