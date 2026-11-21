@@ -94,7 +94,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
 | Capture | `hc read --lines <n>` |
 | Visible capture | `hc read --lines 0` |
 | Send a line and submit | `hc send` |
-| Submit with confirmation | Use `hc send --wait`, with an empty-composer and idle guard when hc reports idle |
+| Submit with confirmation | Use `hc send --wait`, refusing a confirmed draft and guarding idle sends |
 | Named key | `hc keys` |
 | Current path | `hc get`, the foreground process's `cwd` |
 | Busy state | `hc get`, native `status.state` (`working` is busy) |
@@ -111,7 +111,8 @@ The daemon checks that the supervisor composer is empty before sending marked in
 
 - `hc send` always presses Enter, and `hc keys` cannot type arbitrary Unicode text.
   `bin/fm-spawn.sh` pastes and submits the spawn launch line with `hc send` and consumes the Enter that follows it.
-- When hc reports idle, Firstmate requires a confirmed-empty composer and sends with `--if idle`.
+- When hc reports idle, Firstmate refuses a confirmed draft and sends with `--if idle` otherwise.
+  An unknown composer can contain a draft that the screen classifier cannot identify.
   When hc does not report idle, Firstmate sends without the idle condition, so a terminal without native status remains reachable.
   The screen read and `hc send` are separate, so a draft can appear between them.
   Away and quiet escalations stay buffered when the supervisor composer cannot be classified.

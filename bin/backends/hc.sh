@@ -376,8 +376,8 @@ fm_backend_hc_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <s
   native=$(printf '%s' "$json" | jq -r '.status.state // ""' 2>/dev/null) || { printf 'send-failed'; return 0; }
   if [ "$native" = idle ]; then
     verdict=$(fm_backend_hc_composer_state "$target" "$expected")
-    if [ "$verdict" != empty ]; then
-      echo "error: hc composer is not confirmed empty (state=${verdict:-unknown})" >&2
+    if [ "$verdict" = pending ]; then
+      echo "error: hc composer contains a draft" >&2
       printf 'send-failed'
       return 0
     fi

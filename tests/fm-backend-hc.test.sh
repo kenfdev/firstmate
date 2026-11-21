@@ -366,25 +366,26 @@ test_send_text_submit_requires_empty_idle_composer() {
   assert_equals "$(grep -c $'\x1fsend\x1f' "$D/log")" 2 "a status mismatch must make one fallback attempt"
   assert_not_contains "$(grep $'\x1fsend\x1f' "$D/log" | sed -n '2p')" $'--if\x1fidle\x1f' \
     "the fallback must not repeat the idle condition"
-  printf '❯ draft\n' > "$D/screen"
+  printf '╭────────────╮\n│ ❯ draft    │\n╰────────────╯\n' > "$D/screen"
   : > "$D/log"
   out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>/dev/null)
-  assert_equals "$out" send-failed "a draft or unproven composer must be refused"
+  assert_equals "$out" send-failed "a confirmed draft must be refused"
   if grep -q $'\x1fsend\x1f' "$D/log" || grep -q $'\x1fkeys\x1f' "$D/log"; then
     fail "refused input must not reach the terminal"
   fi
-  printf 'unrecognized screen\n' > "$D/screen"
+  printf '› Ask Codex to do anything\n' > "$D/screen"
+  assert_equals "$(hc_shell 'fm_backend_hc_composer_state fmtest:t1 fm-a1')" unknown "the Codex placeholder must exercise the unknown classifier result"
+  : > "$D/log"
   out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>/dev/null)
-  assert_equals "$out" send-failed "an unknown composer must be refused"
+  assert_equals "$out" empty "a Codex placeholder must not block delivery"
+  assert_contains "$(cat "$D/log")" $'--if\x1fidle\x1f' "an unknown composer must keep the idle guard"
   mkdir -p "$D/t.inbox"
   printf 'message\n' > "$D/t.inbox/001.msg"
   rc=0
   hc_shell '. "'"$FM_TEST_ROOT"'/bin/fm-task-inbox-lib.sh"; fm_task_inbox_ring hc fmtest:t1 "'"$D"'/t.inbox/001.msg" fm-a1' || rc=$?
-  assert_equals "$rc" 2 "hc doorbell must report that it was not delivered"
-  [ -f "$D/t.inbox/001.msg" ] || fail "refusal must preserve the inbox record"
-  if grep -q $'\x1fsend\x1f' "$D/log" || grep -q $'\x1fkeys\x1f' "$D/log"; then
-    fail "refused doorbell must not reach the terminal"
-  fi
+  assert_equals "$rc" 0 "hc doorbell must reach a Codex placeholder"
+  [ -f "$D/t.inbox/001.msg" ] || fail "delivery must preserve the inbox record"
+  assert_contains "$(cat "$D/log")" $'--if\x1fidle\x1f' "doorbell with unknown composer must keep the idle guard"
   printf '❯\n' > "$D/screen"
   rc=0
   hc_shell '. "'"$FM_TEST_ROOT"'/bin/fm-task-inbox-lib.sh"; fm_task_inbox_ring hc fmtest:t1 "'"$D"'/t.inbox/001.msg" fm-a1' || rc=$?
