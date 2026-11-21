@@ -143,8 +143,8 @@ assert_task_labels() {  # <id> <terminal-addr>
   labels=$("$ROOT/bin/fm-hc-lab.sh" run "$HC_TEST_SES" get "$2" --json \
     | jq -r '.labels["herdr.space"], .labels["herdr.tab"], .labels["firstmate.task"], .labels["firstmate.home"]' 2>/dev/null) \
     || fail "hc get on the spawned task terminal failed for $1"
-  [ "$(printf '%s\n' "$labels" | sed -n 1p)" = "fm-$HOMETAG" ] \
-    || fail "$1's herdr.space must be fm-$HOMETAG, got: $labels"
+  [ "$(printf '%s\n' "$labels" | sed -n 1p)" = "fm-$HOMETAG-fm-$1" ] \
+    || fail "$1's herdr.space must be fm-$HOMETAG-fm-$1, got: $labels"
   [ "$(printf '%s\n' "$labels" | sed -n 2p)" = "$HOMETAG-fm-$1" ] \
     || fail "$1's herdr.tab must be $HOMETAG-fm-$1, got: $labels"
   [ "$(printf '%s\n' "$labels" | sed -n 3p)" = "fm-$1" ] \

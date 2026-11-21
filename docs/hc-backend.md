@@ -66,9 +66,10 @@ The terminal carries these labels:
 | --- | --- | --- |
 | `firstmate.task` | `fm-<id>` | Task identity checked before input or close. |
 | `firstmate.home` | `<hometag>` from `bin/fm-backend-hometag-lib.sh` | Keeps two homes with the same task id apart. |
-| `herdr.space` | `FM_HC_SPACE`, default `fm-<hometag>` | Groups a home's tasks in one Herdr.app space. |
+| `herdr.space` | `fm-<hometag>-fm-<id>` by default | Gives each ship or scout a Herdr.app space. |
 | `herdr.tab` | `<hometag>-fm-<id>` | One Herdr.app tab per task. |
 | `herdr.seen` | `0` at creation | Lets Herdr clients show later completed turns as unseen. |
+| `firstmate.group` and `firstmate.group-order` | Group and order from `config/herdr-project-groups`, when enabled | Records display metadata on the terminal. |
 
 ```text
 backend=hc
@@ -79,6 +80,19 @@ hc_terminal=<address>
 ```
 
 `backend_detect=` is `app-terminal` only when that signal automatically selected hc; an explicitly selected hc writes no `backend_detect=` line.
+
+The shared `config/herdr-presentation-spaces` setting selects per-task spaces for ship and scout tasks.
+Absent, empty, and `on` select a per-task space; `off` selects the shared `fm-<hometag>` home space.
+An invalid value warns and uses the default.
+A secondmate stays in the shared home space.
+An explicit `FM_HC_SPACE` selects that space instead.
+Changing a setting affects new terminals only.
+
+The shared `config/herdr-project-groups` setting uses the same project and task selector rules as [Herdr project groups](herdr-backend.md#project-groups).
+When enabled, Firstmate records the resolved group and order on each new ship or scout terminal.
+Herdr.app does not expose Herdr's project-group sidebar, sorted agents view, or workspace ordering through these labels.
+Group labels are metadata only, not a visual group or task ownership, and changes to rules do not update existing terminals.
+Use `hc get` to inspect them.
 
 `<address>` is hc's terminal address such as `t7`.
 Every adapter call sets exactly the recorded `HC_SESSION` and drops any inherited `HC_SOCKET`, which hc would otherwise prefer, so a task keeps reaching its own core even when the caller's environment names another one.
@@ -125,10 +139,10 @@ The daemon checks that the supervisor composer is empty before sending marked in
   Ship and scout relaunch also refuses a missing terminal because the task record does not identify the core socket or its state directory.
   A different core can answer not found while the recorded agent remains alive on its original core.
 - A worker inherits `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` from its terminal, and the `config/launch-env-allowlist` floor keeps them; whether a real harness then reports native status under Firstmate's launch is not verified.
-- Naming a Herdr.app space needs the app window and is not done.
+- Naming, ordering, and arranging Herdr.app spaces and tabs need the app window and are not done by Firstmate.
   The `herdr.space`/`herdr.tab` label contract above is the app's documented bridge (its window projects labeled terminals as spaces/tabs and keeps unlabeled ones hidden), verified against a real window: [`verification/runtime-backends.md`](verification/runtime-backends.md#hc) records the live exercise.
-- The `herdr` backend's project-group sidebar tokens, sorted agents view, and per-task presentation spaces have no equivalent in the hc adapter.
-  The app owns its layout and space names; the shared `herdr-project-groups` and `herdr-presentation-spaces` settings apply only to the `herdr` backend.
+- The `herdr` backend's project-group sidebar tokens, sorted agents view, and group ordering have no equivalent in the hc adapter.
+  The group labels described above do not change the app layout.
 - Firstmate does not change `herdr.pinned` or update `herdr.seen` after creation.
   Herdr clients own pinning and mark turns seen when a person views them.
 - Firstmate does not place individual workers on an hc machine with `--on`.

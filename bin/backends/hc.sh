@@ -30,9 +30,8 @@
 #
 # Visibility in Herdr.app: the app shows a terminal that carries
 # herdr.space=<id> and herdr.tab=<id> labels, and an unknown id becomes a new
-# space or tab. create_task sets herdr.space=FM_HC_SPACE (default
-# fm-<hometag>) and herdr.tab=<scoped label>, so a home's tasks group in one
-# space with one tab each. Naming the space needs the app window and is not done.
+# space or tab. Presentation labels never authorize lifecycle operations.
+# Naming or ordering spaces needs the app window and is not done.
 #
 # Measured limits on hc 0.1.13 and 0.1.14 (docs/hc-backend.md "Limits"):
 #   - `hc send` presses Enter after pasting. When native idle is available, a
@@ -278,10 +277,30 @@ fm_backend_hc_container_ensure() {
 # --no-parent and --outlive-parent keep the terminal independent of whichever
 # hc terminal firstmate itself runs in; --no-notify keeps hc from typing notes
 # into any parent.
-fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
-  local session=$1 label=$2 cwd=$3 home scoped dup out address
+fm_backend_hc_create_task() {  # <session> <window-label> <cwd> [kind]
+  local session=$1 label=$2 cwd=$3 kind=${4:-ship} home scoped dup out address space pref group_key
+  local -a group_labels=()
   home=$(fm_backend_hometag)
   scoped=$(fm_backend_hc_scoped_label "$label")
+  space=${FM_HC_SPACE:-fm-$home}
+  if [ -z "${FM_HC_SPACE:-}" ] && [ "$kind" != secondmate ]; then
+    pref=default
+    if [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/herdr-presentation-spaces" ]; then
+      pref=$(tr -d '[:space:]' < "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/herdr-presentation-spaces" | tr '[:upper:]' '[:lower:]')
+      case "$pref" in
+        off) ;;
+        ''|on) pref=on ;;
+        *) echo "warning: unrecognized herdr-presentation-spaces value; using default" >&2; pref=default ;;
+      esac
+    fi
+    [ "$pref" = off ] || space="fm-$scoped"
+  fi
+  if [ "$kind" != secondmate ] && [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/herdr-project-groups" ]; then
+    group_key=$("$FM_BACKEND_LIB_DIR/fm-herdr-groups.sh" order-key "${label#fm-}" "$cwd") || group_key=
+    if [ -n "$group_key" ]; then
+      group_labels=(--label "firstmate.group=${group_key#*.}" --label "firstmate.group-order=$group_key")
+    fi
+  fi
   dup=$(fm_backend_hc_cli "$session" ls --json --label "firstmate.task=$label" --label "firstmate.home=$home" 2>/dev/null) \
     || { echo "error: 'hc ls' failed for session '$session'; cannot create $label" >&2; return 1; }
   if [ -n "$(printf '%s' "$dup" | jq -r '.terminals[]?.address' 2>/dev/null)" ]; then
@@ -291,8 +310,8 @@ fm_backend_hc_create_task() {  # <session> <window-label> <cwd>
   out=$(fm_backend_hc_cli "$session" run --bg --json --no-parent --outlive-parent --no-notify \
     --cwd "$cwd" \
     --label "firstmate.task=$label" --label "firstmate.home=$home" \
-    --label "herdr.space=${FM_HC_SPACE:-fm-$home}" --label "herdr.tab=$scoped" \
-    --label "herdr.seen=0" 2>&1) \
+    --label "herdr.space=$space" --label "herdr.tab=$scoped" \
+    --label "herdr.seen=0" "${group_labels[@]}" 2>&1) \
     || { echo "error: hc run failed for $label: $out" >&2; return 1; }
   address=$(printf '%s' "$out" | jq -r '.address // empty' 2>/dev/null)
   fm_backend_hc_address_valid "$address" || { echo "error: hc run did not return a terminal address for $label (got: $out)" >&2; return 1; }

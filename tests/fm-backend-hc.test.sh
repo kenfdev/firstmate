@@ -144,7 +144,7 @@ test_create_task_is_independent_labeled_and_refuses_duplicates() {
   tag=$(hometag_of)
   out=$(grep $'\x1frun\x1f' "$D/log")
   for want in HC_SESSION=fmtest --no-parent --outlive-parent --no-notify $'--cwd\x1f/proj' \
-    "firstmate.task=fm-a1" "firstmate.home=$tag" "herdr.space=fm-$tag" "herdr.tab=$tag-fm-a1" "herdr.seen=0"; do
+    "firstmate.task=fm-a1" "firstmate.home=$tag" "herdr.space=fm-$tag-fm-a1" "herdr.tab=$tag-fm-a1" "herdr.seen=0"; do
     assert_contains "$out" "$want" "hc run must carry $want"
   done
   printf '{"terminals":[{"address":"t9"}]}\n' > "$D/ls.json"
@@ -152,6 +152,39 @@ test_create_task_is_independent_labeled_and_refuses_duplicates() {
   expect_refused hc_shell 'fm_backend_hc_create_task fmtest fm-a1 /proj'
   assert_not_contains "$(cat "$D/log")" $'\x1frun\x1f' "a live duplicate must not start a second terminal"
   pass "hc: create_task starts an independent labeled terminal and refuses a duplicate"
+}
+
+test_presentation_settings_and_group_rules() {
+  local out tag
+  setup_case presentation
+  mkdir -p "$HOMEDIR/config"
+  printf '{"address":"t9"}\n' > "$D/run.json"
+  tag=$(hometag_of)
+  printf 'off\n' > "$HOMEDIR/config/herdr-presentation-spaces"
+  printf 'Backend task:api repo:server\nOther *\n' > "$HOMEDIR/config/herdr-project-groups"
+  hc_shell 'fm_backend_hc_create_task fmtest fm-api-one /project/server' >/dev/null
+  out=$(grep $'\x1frun\x1f' "$D/log")
+  assert_contains "$out" "herdr.space=fm-$tag" "off keeps the home space"
+  assert_contains "$out" "firstmate.group=Backend" "the task selector wins"
+  assert_contains "$out" "firstmate.group-order=001.Backend" "the rule order is recorded"
+  : > "$D/log"
+  printf 'on\n' > "$HOMEDIR/config/herdr-presentation-spaces"
+  hc_shell 'fm_backend_hc_create_task fmtest fm-other /project/server' >/dev/null
+  out=$(grep $'\x1frun\x1f' "$D/log")
+  assert_contains "$out" "herdr.space=fm-$tag-fm-other" "on creates a task space"
+  assert_contains "$out" "firstmate.group=Backend" "the repository selector wins over wildcard"
+  : > "$D/log"
+  hc_shell 'fm_backend_hc_create_task fmtest fm-mate /project/server secondmate' >/dev/null
+  out=$(grep $'\x1frun\x1f' "$D/log")
+  assert_contains "$out" "herdr.space=fm-$tag" "secondmates stay in the home space"
+  assert_not_contains "$out" "firstmate.group=" "secondmates receive no project group"
+  : > "$D/log"
+  printf 'off\n' > "$HOMEDIR/config/herdr-project-groups"
+  hc_shell 'FM_HC_SPACE=chosen fm_backend_hc_create_task fmtest fm-other /project/server' >/dev/null
+  out=$(grep $'\x1frun\x1f' "$D/log")
+  assert_contains "$out" "herdr.space=chosen" "explicit space is honored"
+  assert_not_contains "$out" "firstmate.group=" "off omits group labels"
+  pass "hc: presentation switches, group selectors and secondmate exclusion"
 }
 
 test_control_interrupt_delivers_the_harness_keys() {
@@ -521,6 +554,7 @@ fm_test_run \
   test_event_snapshot_dedupe_and_fallback \
   test_required_tool_check_uses_the_adapter_resolver \
   test_create_task_is_independent_labeled_and_refuses_duplicates \
+  test_presentation_settings_and_group_rules \
   test_control_interrupt_delivers_the_harness_keys \
   test_control_exit_accepts_a_proven_dead_secondmate \
   test_foreign_or_unlabeled_terminal_gets_no_input_and_no_close \

@@ -113,6 +113,29 @@ T="$SES:$ADDR"
 fm_backend_target_exists hc "$T" "$LABEL" || fail "the new terminal must exist under its label"
 pass "hc smoke: create_task started $T"
 
+TAG=$(fm_backend_hometag)
+labels=$("$ROOT/bin/fm-hc-lab.sh" run "$HC_TEST_SES" get "$ADDR" --json) || fail "get task labels"
+assert_equals "$(printf '%s' "$labels" | jq -r '.labels["herdr.space"]')" "fm-$TAG-$LABEL" "default task space"
+assert_equals "$(printf '%s' "$labels" | jq -r '.labels["herdr.tab"]')" "$TAG-$LABEL" "task tab"
+mkdir -p "$FM_HOME_DIR/config"
+printf 'off\n' > "$FM_HOME_DIR/config/herdr-presentation-spaces"
+printf 'Project task:group\nOther *\n' > "$FM_HOME_DIR/config/herdr-project-groups"
+GROUP_ADDR=$(fm_backend_hc_create_task "$SES" fm-group-one "$WORK_DIR") || fail "create grouped task"
+labels=$("$ROOT/bin/fm-hc-lab.sh" run "$HC_TEST_SES" get "$GROUP_ADDR" --json) || fail "get grouped task labels"
+assert_equals "$(printf '%s' "$labels" | jq -r '.labels["herdr.space"]')" "fm-$TAG" "off selects home space"
+assert_equals "$(printf '%s' "$labels" | jq -r '.labels["herdr.tab"]')" "$TAG-fm-group-one" "grouped task tab"
+assert_equals "$(printf '%s' "$labels" | jq -r '.labels["firstmate.group"]')" Project "group rule"
+assert_equals "$(printf '%s' "$labels" | jq -r '.labels["firstmate.group-order"]')" 001.Project "group order"
+fm_backend_kill hc "$SES:$GROUP_ADDR" fm-group-one || fail "close grouped task"
+printf 'on\n' > "$FM_HOME_DIR/config/herdr-presentation-spaces"
+PROJECTED_ADDR=$(fm_backend_hc_create_task "$SES" fm-group-two "$WORK_DIR") || fail "create projected grouped task"
+labels=$("$ROOT/bin/fm-hc-lab.sh" run "$HC_TEST_SES" get "$PROJECTED_ADDR" --json) || fail "get projected group labels"
+assert_equals "$(printf '%s' "$labels" | jq -r '.labels["herdr.space"]')" "fm-$TAG-fm-group-two" "projected group has its own space"
+assert_equals "$(printf '%s' "$labels" | jq -r '.labels["firstmate.group"]')" Project "projected group rule"
+fm_backend_kill hc "$SES:$PROJECTED_ADDR" fm-group-two || fail "close projected grouped task"
+printf 'off\n' > "$FM_HOME_DIR/config/herdr-presentation-spaces"
+pass "hc smoke: task spaces, tabs, flat opt-out and group labels read back"
+
 ADDR2=$(fm_backend_hc_create_task "$SES" fm-smoke2 "$WORK_DIR") || fail "second create_task failed"
 ADDR3=$(FM_HC_SPACE=custom-space fm_backend_hc_create_task "$SES" fm-smoke3 "$WORK_DIR") || fail "custom-space create_task failed"
 HOMETAG=$(fm_backend_hometag)
@@ -120,10 +143,12 @@ labels1=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" get --json "$ADDR") || fail "first
 labels2=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" get --json "$ADDR2") || fail "second task labels unavailable"
 labels3=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" get --json "$ADDR3") || fail "custom-space task labels unavailable"
 printf '%s\n%s\n' "$labels1" "$labels2" | jq -se --arg space "fm-$HOMETAG" --arg tag "$HOMETAG" '
-  length == 2 and all(.[]; .labels["herdr.space"] == $space and .labels["herdr.seen"] == "0")
+  length == 2 and all(.[]; .labels["herdr.seen"] == "0")
+  and .[0].labels["herdr.space"] == ($space + "-fm-smoke1")
+  and .[1].labels["herdr.space"] == $space
   and .[0].labels["herdr.tab"] == ($tag + "-fm-smoke1")
   and .[1].labels["herdr.tab"] == ($tag + "-fm-smoke2")' >/dev/null \
-  || fail "tasks must share the home space, have distinct tabs, and start seen at turn zero"
+  || fail "tasks must use their selected spaces, have distinct tabs, and start seen at turn zero"
 printf '%s' "$labels3" | jq -e '.labels["herdr.space"] == "custom-space" and .labels["herdr.seen"] == "0"' >/dev/null \
   || fail "the space override must place the task in its selected space"
 "$ROOT/bin/fm-hc-lab.sh" run "$SES" label "$ADDR" herdr.pinned=1 herdr.seen=3 >/dev/null \
@@ -132,7 +157,7 @@ fm_backend_capture hc "$T" 10 "$LABEL" >/dev/null || fail "capture failed after 
 labels1=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" get --json "$ADDR") || fail "updated labels unavailable"
 printf '%s' "$labels1" | jq -e '.labels["herdr.pinned"] == "1" and .labels["herdr.seen"] == "3"' >/dev/null \
   || fail "capture must preserve shared pinned and seen labels"
-pass "hc smoke: home grouping and task tabs preserve shared client labels"
+pass "hc smoke: task spaces and tabs preserve shared client labels"
 
 mkdir -p "$WORK_DIR/sub"
 fm_backend_hc_send_text_line "$T" "cd sub" "$LABEL" || fail "send_text_line failed"
