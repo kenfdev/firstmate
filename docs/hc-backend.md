@@ -113,6 +113,7 @@ An input, capture, or close that carries the task label refuses a terminal whose
 | Current path | `hc get`, the foreground process's `cwd` |
 | Busy state | `hc get`, native `status.state` (`working` is busy) |
 | Agent state | `hc get`, the foreground process and its process group, through the shared classifier |
+| Composer state | `hc read --lines 0` through the shared classifier, with `hc get` native status settling a row that equals a known idle placeholder |
 | Close | `hc kill`, then `hc rm`, then `hc get` must answer not found |
 
 ## Away and quiet supervision
@@ -125,6 +126,11 @@ The daemon checks that the supervisor composer is empty before sending marked in
 
 - `hc send` always presses Enter, and `hc keys` cannot type arbitrary Unicode text.
   `bin/fm-spawn.sh` pastes and submits the spawn launch line with `hc send` and consumes the Enter that follows it.
+- `hc read` returns plain text, so a harness's dim idle placeholder and a typed copy of the same words arrive as identical characters.
+  The composer reads `empty` when the composer row exactly equals an idle placeholder from the shared set in `bin/fm-composer-lib.sh` and hc's native status is `idle` or `done`.
+  Any other row, a one-character difference, a `working` or `blocked` status, or a terminal without native status reads `unknown` or `pending`, so `exit`, `relaunch`, and away-mode injection refuse.
+  A person who types the placeholder's exact text at a native-idle prompt is the residual: that draft reads `empty` here, where Herdr's styled read would see pending text.
+  The 60-second draft hold inside `hc send` and the `--if idle` condition narrow that window but do not close it.
 - When hc reports idle, Firstmate refuses a confirmed draft and sends with `--if idle` otherwise.
   An unknown composer can contain a draft that the screen classifier cannot identify.
   When hc does not report idle, Firstmate sends without the idle condition, so a terminal without native status remains reachable.

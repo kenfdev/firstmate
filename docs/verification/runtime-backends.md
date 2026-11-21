@@ -3710,13 +3710,44 @@ The `--if idle` checks used local slash commands, except the omp check, which hc
 | Harness | Prompt status | `hc send --if idle` result |
 | --- | --- | --- |
 | Claude Code 2.1.330 | `idle`, app `claude-code` | `/help` opened the local help screen, `started:false`. |
-| Codex 0.169.0 | `idle`, app `codex` | `/status` opened the local status screen through Firstmate's submit path; its screen was classified `unknown`. |
+| Codex 0.169.0 | `idle`, app `codex` | `/status` opened the local status screen through Firstmate's submit path; its screen was then classified `unknown` (see the placeholder proof below). |
 | Pi 1.4.0 | `idle`, app `pi` | `/help` was accepted with `started:true`; the screen reported it unavailable. |
 | omp 17.3.4 | No reported status | Exit 10, `status_mismatch`; nothing was typed. |
 
 With a manually typed Codex draft, `hc send --if idle` appended and submitted the text despite the idle condition.
 An unrecognized or ambiguous screen cannot establish that a composer is empty.
 The portable regression is `tests/fm-backend-hc.test.sh`.
+
+### Composer placeholder proof on hc 0.1.21
+
+On 2026-11-21, hc 0.1.21 on Linux read the idle prompts of Codex 0.169.0, Claude Code 2.1.330, and Pi 1.4.0 with `fm-hc-lab.sh run <session> read --lines 0 <terminal>` in a fresh lab, each started with a throwaway cwd and no model call.
+Codex's idle composer row was `› Ask Codex to do anything`; after `keys -- d r a f t` it was `› draft`, and the two reads differed only in those characters, with no styling in either.
+Claude Code's idle row was `❯ ` between two rule lines and Pi's was blank between two rule lines.
+`hc get --json` reported `{"app":"codex","state":"idle"}`, `{"app":"claude-code","state":"idle"}`, and `{"app":"pi","state":"idle"}` at those prompts.
+A real Codex secondmate then ran in a second fresh lab through `bin/fm-spawn.sh mate <home> --harness codex --model gpt-6.1-terra --effort low --secondmate` with an isolated `CODEX_HOME` holding only `auth.json` and an empty `config.toml`.
+After its startup turn and one steer through `bin/fm-send.sh`, `hc get` reported `{"app":"codex","state":"done"}` at the prompt, and `fm_backend_hc_composer_state` read `empty`.
+
+```text
+composer with draft: unknown
+exit with draft rc=1: error: task mate's composer state is 'unknown', not proven empty; refusing to type the /quit exit command because it could concatenate onto existing text. Clear the composer, then retry 'exit'
+agent after refused exit: alive
+composer after clearing draft: empty
+interrupt-delivered mate harness=codex backend=hc verified=agent-alive cancel=unconfirmed
+stopped mate harness=codex backend=hc endpoint=fm-hclab-realmate-508035-23676:t1 worktree=/tmp/real-mate.WBw6GW/mate-home
+after exit: dead
+```
+
+A second run with `codex gpt-6.1-terra low` in the parent's `config/secondmate-harness` and no steer took the whole exit-and-relaunch path.
+
+```text
+exit rc=0: stopped mate harness=codex backend=hc endpoint=fm-hclab-realmate-2897728-20834:t1 worktree=/tmp/real-mate.3DQudg/mate-home
+after exit: dead
+relaunch rc=0: relaunched mate harness=codex from=codex model=gpt-6.1-terra effort=low backend=hc endpoint=fm-hclab-realmate-2897728-20834:t1 worktree=/tmp/real-mate.3DQudg/mate-home
+STEP relaunch alive: alive
+```
+
+The relaunched Codex still reported `working` on its startup turn 120 seconds later, so a further `exit` at that moment refused with the composer `unknown` and typed nothing; the proof requires `idle` or `done`.
+The portable regression is `tests/fm-backend-hc.test.sh`; the live check is this procedure, which spends one spawn turn per launch and one steer.
 
 ### Adapter lifecycle
 

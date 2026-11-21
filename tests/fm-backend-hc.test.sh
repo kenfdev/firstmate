@@ -14,7 +14,9 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-hc-tests)
 # The stub answers `get` from <dir>/<address>.json (exit from <address>.exit,
 # 3 = not_found when no file exists), `ls` from <dir>/ls.json, `run` with
 # <dir>/run.json, and removes <address>.json on `rm` unless <dir>/rm-sticks
-# exists. Every call is logged with its HC_SESSION and HC_SOCKET.
+# exists. A successful `send` sources <dir>/send.after when it exists, so a
+# case can make the terminal react to submitted text. Every call is logged
+# with its HC_SESSION and HC_SOCKET.
 make_hc_fakebin() {  # <dir> -> echoes fakebin dir
   local fb="$1/fakebin"
   mkdir -p "$fb"
@@ -67,6 +69,7 @@ case "$cmd" in
       exit "$(cat "$D/send.exit")"
     fi
     cat "$D/send.json" 2>/dev/null || printf '{"started":true,"wait":{"status":"working"}}\n'
+    [ ! -f "$D/send.after" ] || . "$D/send.after"
     ;;
   *) printf '{}\n' ;;
 esac
@@ -288,6 +291,72 @@ EOF
   pass "hc: control exit accepts a proven stopped secondmate without sending input"
 }
 
+# The exit proof on hc: the composer must read exactly `empty` before `/quit`
+# is typed. hc reads plain text, so the proof is the shared classifier's
+# placeholder=ask capability: an unstyled row equal to a known idle placeholder
+# plus hc's native idle status. A typed draft, a draft that differs from the
+# placeholder in one character, a working status, and a terminal without native
+# status all keep the refusal, and nothing reaches the terminal.
+test_control_exit_proves_the_placeholder_composer_empty() {
+  local tag out rc id=hcquit1 ctl
+  setup_case quit
+  tag=$(hometag_of)
+  mkdir -p "$HOMEDIR/state" "$HOMEDIR/data"
+  write_terminal "$D" t2 live "fm-$id" "$tag" codex /usr/bin/codex
+  jq '.status = {"app":"codex","state":"idle"}' "$D/t2.json" > "$D/t2.next" && mv "$D/t2.next" "$D/t2.json"
+  cat > "$HOMEDIR/state/$id.meta" <<EOF
+window=fmtest:t2
+endpoint_task_id=$id
+worktree=$D
+project=$D
+home=$D
+kind=secondmate
+harness=codex
+backend=hc
+hc_session=fmtest
+hc_terminal=t2
+EOF
+  ctl() {
+    FAKE_HC_DIR=$D PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FM_HOME=$HOMEDIR FM_ROOT_OVERRIDE=$HOMEDIR \
+      FM_STATE_OVERRIDE="$HOMEDIR/state" FM_DATA_OVERRIDE="$HOMEDIR/data" FM_CONTROL_POLL=0.05 \
+      "$FM_TEST_ROOT/bin/fm-control.sh" "$id" exit 2>&1
+  }
+  printf '› draft\n' > "$D/screen"
+  : > "$D/log"
+  rc=0; out=$(ctl) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a typed draft must refuse exit: $out"
+  assert_contains "$out" 'not proven empty' "the refusal must name the unproven composer"
+  assert_not_contains "$(cat "$D/log")" $'\x1fsend\x1f' "a refused exit must type nothing"
+  printf '› ask codex to do anything\n' > "$D/screen"
+  : > "$D/log"
+  rc=0; out=$(ctl) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a near-copy of the placeholder must refuse exit: $out"
+  assert_not_contains "$(cat "$D/log")" $'\x1fsend\x1f' "a near-copy must type nothing"
+  printf '› Ask Codex to do anything\n' > "$D/screen"
+  jq 'del(.status)' "$D/t2.json" > "$D/t2.next" && mv "$D/t2.next" "$D/t2.json"
+  : > "$D/log"
+  assert_equals "$(hc_shell 'fm_backend_hc_composer_state fmtest:t2 fm-'"$id")" unknown "without native status the placeholder must stay unknown"
+  rc=0; out=$(ctl) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a terminal without native status must refuse exit: $out"
+  assert_not_contains "$(cat "$D/log")" $'\x1fsend\x1f' "no native status must type nothing"
+  jq '.status = {"app":"codex","state":"working"}' "$D/t2.json" > "$D/t2.next" && mv "$D/t2.next" "$D/t2.json"
+  assert_equals "$(hc_shell 'fm_backend_hc_composer_state fmtest:t2 fm-'"$id")" unknown "a working status must not prove the placeholder"
+  jq '.status = {"app":"codex","state":"idle"}' "$D/t2.json" > "$D/t2.next" && mv "$D/t2.next" "$D/t2.json"
+  assert_equals "$(hc_shell 'fm_backend_hc_composer_state fmtest:t2 fm-'"$id")" empty "placeholder plus native idle must read empty"
+  write_terminal "$D" t2.dead live "fm-$id" "$tag" bash bash
+  cat > "$D/send.after" <<EOF
+mv "$D/t2.dead.json" "$D/t2.json"
+printf '%s\\n' '\$' > "$D/screen"
+EOF
+  : > "$D/log"
+  rc=0; out=$(ctl) || rc=$?
+  expect_code 0 "$rc" "exit must proceed on a placeholder composer with native idle"$'\n'"$out"
+  assert_contains "$out" 'stopped' "exit must report the stopped agent"
+  assert_contains "$(grep $'\x1fsend\x1f' "$D/log")" $'--if\x1fidle\x1f' "the exit command must keep the idle guard"
+  assert_contains "$(grep $'\x1fsend\x1f' "$D/log")" $'\x1f/quit' "the exit command must be the harness's exit"
+  pass "hc: exit types /quit only onto a placeholder composer proven empty by native idle"
+}
+
 test_foreign_or_unlabeled_terminal_gets_no_input_and_no_close() {
   local tag
   setup_case foreign
@@ -456,11 +525,18 @@ test_send_text_submit_requires_empty_idle_composer() {
     fail "refused input must not reach the terminal"
   fi
   printf '› Ask Codex to do anything\n' > "$D/screen"
-  assert_equals "$(hc_shell 'fm_backend_hc_composer_state fmtest:t1 fm-a1')" unknown "the Codex placeholder must exercise the unknown classifier result"
+  assert_equals "$(hc_shell 'fm_backend_hc_composer_state fmtest:t1 fm-a1')" empty "the Codex placeholder on a native-idle terminal must read empty"
   : > "$D/log"
   out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>/dev/null)
   assert_equals "$out" empty "a Codex placeholder must not block delivery"
+  assert_contains "$(cat "$D/log")" $'--if\x1fidle\x1f' "a placeholder composer must keep the idle guard"
+  printf '› Status check\n' > "$D/screen"
+  assert_equals "$(hc_shell 'fm_backend_hc_composer_state fmtest:t1 fm-a1')" unknown "unstyled text after the glyph must stay unknown"
+  : > "$D/log"
+  out=$(hc_shell 'fm_backend_hc_send_text_submit fmtest:t1 "deploy now" 3 0.4 0 fm-a1' 2>/dev/null)
+  assert_equals "$out" empty "an unknown composer must not block delivery"
   assert_contains "$(cat "$D/log")" $'--if\x1fidle\x1f' "an unknown composer must keep the idle guard"
+  printf '› Ask Codex to do anything\n' > "$D/screen"
   mkdir -p "$D/t.inbox"
   printf 'message\n' > "$D/t.inbox/001.msg"
   rc=0
@@ -607,6 +683,7 @@ fm_test_run \
   test_control_interrupt_delivers_the_harness_keys \
   test_control_rechecks_hc_core_and_agent_identity \
   test_control_exit_accepts_a_proven_dead_secondmate \
+  test_control_exit_proves_the_placeholder_composer_empty \
   test_foreign_or_unlabeled_terminal_gets_no_input_and_no_close \
   test_invalid_session_never_reaches_hc \
   test_inherited_socket_never_overrides_the_session \

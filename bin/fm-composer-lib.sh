@@ -46,6 +46,20 @@
 #               shape Cortex's identity could change. A probe answering
 #               `cortex` then proves it, as cortex=1 does. Other callers
 #               never see this sentinel for a titled box.
+#   placeholder=ask
+#               the caller's capture is unstyled (styled=0) and it can probe
+#               identity lazily (it declares identity=1): an unstyled composer
+#               row whose text is EXACTLY one anchored idle placeholder (case
+#               and all) is the one shape the probe settles. The verdict is
+#               `need-identity` until the probe answers; an identity whose
+#               status is idle or done proves the row is the harness's own
+#               placeholder and reads `empty`; probe-absent, a working or
+#               blocked status, or a row that differs from the placeholder in
+#               any character keeps `unknown`. hc declares it (its `hc get`
+#               status is the probe); herdr's unstyled fallback does not, so
+#               its verdicts are unchanged. A person who types the placeholder
+#               text exactly is the accepted residual, named in
+#               docs/hc-backend.md.
 #   rows=<n>    the capture's bounded row count (informational).
 #
 # THE STRICT BLANK-ROW RULE (captain decision blank-row-injection-posture,
@@ -626,10 +640,14 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # Command Code renders the anchored `Ask your question...`
 # after its `❯` glyph (verified live, Command Code 1.74.1); its truecolor is too
 # bright for the default ghost ceiling, so fm_composer_classify_screen reads its
-# screen with a raised one. kiro's bare `›` composer needs no entry here: see
+# screen with a raised one. Codex renders the anchored `Ask Codex to do
+# anything` after its bare `›` glyph as one dim run (verified live, codex
+# 0.169.0 on hc 0.1.21); styled captures strip it before this set is consulted,
+# so the entry only serves unstyled captures, where it reads `unknown` unless
+# the caller declares placeholder=ask. kiro's bare `›` composer needs no entry here: see
 # FM_COMPOSER_HINTED_IDLE_RE_DEFAULT below. FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$|^Type your message\.\.\.$|^Type to queue message\.\.\.$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Ask your question\.\.\.$|^Type your message\.\.\.$|^Type to queue message\.\.\.$|^Ask Codex to do anything$'
 
 # KIRO ONLY (fm_composer_kiro_scope): idle placeholders that carry a submit hint
 # typed input never renders, so the whole anchored row proves an empty composer
@@ -919,10 +937,39 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
       printf 'empty'; return 0
     fi
     if [ "$styled" != 1 ]; then
-      printf 'unknown'; return 0
+      _fm_composer_placeholder_ask_verdict "$content" "$idle_re"
+      return 0
     fi
   fi
   printf 'pending'; return 0
+}
+
+# _fm_composer_placeholder_ask_verdict: the verdict for an UNSTYLED composer
+# row whose content collided with the idle set (placeholder=ask in the header).
+# Only fm_composer_classify_screen turns the scope on, by setting
+# FM_COMPOSER_PLACEHOLDER_ASK=1 and FM_COMPOSER_PLACEHOLDER_IDENTITY to the
+# identity it was given, for the one caps shape that declares the capability;
+# every other caller keeps the plain unstyled verdict, `unknown`.
+# The collision above may have matched case-insensitively; this proof requires
+# the row to equal an anchored placeholder exactly, so a typed near-copy still
+# reads unknown.
+_fm_composer_placeholder_ask_verdict() {  # <row-content> <idle_re>
+  local content=$1 idle_re=$2 agent_status
+  if [ "${FM_COMPOSER_PLACEHOLDER_ASK:-0}" != 1 ] \
+     || ! fm_composer_idle_matches "$content" "$idle_re" sensitive; then
+    printf 'unknown'; return 0
+  fi
+  if [ -z "${FM_COMPOSER_PLACEHOLDER_IDENTITY:-}" ]; then
+    printf 'need-identity'; return 0
+  fi
+  if [ "$FM_COMPOSER_PLACEHOLDER_IDENTITY" = probe-absent ]; then
+    printf 'unknown'; return 0
+  fi
+  agent_status=${FM_COMPOSER_PLACEHOLDER_IDENTITY#*$'\t'}
+  case "$agent_status" in
+    idle|done) printf 'empty' ;;
+    *) printf 'unknown' ;;
+  esac
 }
 
 # --- The screen classifier ---------------------------------------------------
@@ -943,7 +990,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # either its result or `probe-absent`; the sentinel never escapes an adapter.
 # Identity stays a lazy second pass: an adapter probes only on `need-identity`
 # or, on tmux, to recheck an `unknown` read for Command Code, so a definite
-# non-pi read never pays for the probe.
+# non-pi read never pays for the probe. placeholder=ask adds one more shape
+# that asks: an unstyled row equal to an idle placeholder.
 #
 # Consumers that can overwrite input or confirm delivery must accept only the
 # exact positive proof they require (`empty`), so unrecognized future verdicts
@@ -2310,7 +2358,7 @@ _fm_composer_hermes_state() {  # <screen> <styled>
 
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
-  local styled=0 cursor=0 has_identity=0 cortex_proven=0 cortex_ask=0 kv plain
+  local styled=0 cursor=0 has_identity=0 cortex_proven=0 cortex_ask=0 placeholder_ask=0 kv plain
   # Note the dialog before any early return so a pending picker is still named.
   fm_composer_note_blocking_dialog "$screen" || true
   while IFS= read -r kv; do
@@ -2320,10 +2368,19 @@ fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
       identity=1) has_identity=1 ;;
       cortex=1) cortex_proven=1 ;;
       cortex=ask) cortex_ask=1 ;;
+      placeholder=ask) placeholder_ask=1 ;;
     esac
   done <<EOF
 $caps
 EOF
+  # placeholder=ask (header): scoped to this one classification, read only by
+  # _fm_composer_placeholder_ask_verdict when an unstyled row collides with the
+  # idle set. It needs identity=1 and an unstyled capture; otherwise it is
+  # inert and the verdicts below are exactly those of the plain caps.
+  local FM_COMPOSER_PLACEHOLDER_ASK=0 FM_COMPOSER_PLACEHOLDER_IDENTITY=$identity
+  if [ "$placeholder_ask" = 1 ] && [ "$has_identity" = 1 ] && [ "$styled" != 1 ]; then
+    FM_COMPOSER_PLACEHOLDER_ASK=1
+  fi
   # A Command Code identity (`commandcode` from the tmux probe, `cmd` from
   # Herdr's native agent detection) reads this one screen with Command Code's
   # placeholder ceiling; see fm_composer_strip_ghost.

@@ -37,6 +37,9 @@
 #   - `hc send` presses Enter after pasting. When native idle is available, a
 #     visible empty composer and the idle condition guard typed delivery, but
 #     are not atomic together.
+#   - `hc read` is plain text (0.1.21): no styling, no cursor, no draft fact.
+#     The composer verdict therefore rests on screen shape plus native status;
+#     see fm_backend_hc_composer_caps.
 #   - hc reports one foreground process per terminal (`foreground` in
 #     `hc get`), not a process group; when that process is a launcher,
 #     agent_state also reads the rest of its process group from local `ps`.
@@ -404,15 +407,39 @@ fm_backend_hc_current_path() {  # <target> [expected-label]
   printf '%s' "$json" | jq -r '.foreground.cwd // .cwd // empty' 2>/dev/null
 }
 
+# hc reads plain text only, so a harness's dim idle placeholder and a typed
+# draft arrive as the same characters. The classifier is told so (styled=0,
+# placeholder=ask) and settles the one ambiguous shape, a row equal to a known
+# placeholder, with hc's native status as the identity probe: idle proves the
+# row is the harness's own placeholder. Herdr's styled read needs none of this.
 fm_backend_hc_composer_caps() {
-  printf 'styled=0\ncursor=0\nidentity=0\nrows=%s\n' "$FM_COMPOSER_CAPTURE_LINES"
+  printf 'styled=0\ncursor=0\nidentity=1\nplaceholder=ask\nrows=%s\n' "$FM_COMPOSER_CAPTURE_LINES"
+}
+
+# fm_backend_hc_composer_identity: "<app>\t<state>" from hc's native status,
+# the lazy identity probe the classifier asks for (need-identity). Prints
+# nothing when the terminal reports no status; the caller passes probe-absent.
+fm_backend_hc_composer_identity() {  # <target>
+  local json app state
+  json=$(fm_backend_hc_get "$1") || return 1
+  app=$(printf '%s' "$json" | jq -r '.status.app // ""' 2>/dev/null) || return 1
+  state=$(printf '%s' "$json" | jq -r '.status.state // ""' 2>/dev/null) || return 1
+  [ -n "$state" ] || return 1
+  printf '%s\t%s' "$app" "$state"
 }
 
 fm_backend_hc_composer_state() {  # <target> [expected-label] -> empty|pending|pending-unproven|unknown
-  local cap verdict
+  local cap caps verdict identity
   cap=$(fm_backend_hc_visible_capture "$1" "${2:-}") || { printf 'unknown'; return 0; }
-  verdict=$(fm_composer_classify_screen "$(fm_backend_hc_composer_caps)" "$cap")
-  [ "$verdict" != need-identity ] || verdict=unknown
+  caps=$(fm_backend_hc_composer_caps)
+  verdict=$(fm_composer_classify_screen "$caps" "$cap")
+  if [ "$verdict" = need-identity ]; then
+    if ! identity=$(fm_backend_hc_composer_identity "$1" 2>/dev/null) || [ -z "$identity" ]; then
+      identity='probe-absent'
+    fi
+    verdict=$(fm_composer_classify_screen "$caps" "$cap" '' "$identity")
+    [ "$verdict" != need-identity ] || verdict=unknown
+  fi
   printf '%s' "$verdict"
 }
 
