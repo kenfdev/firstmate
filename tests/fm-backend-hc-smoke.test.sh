@@ -135,4 +135,69 @@ fm_backend_kill hc "$T" || fail "kill failed"
 assert_equals "$(fm_backend_agent_state hc "$T")" missing "a closed terminal is missing"
 fm_backend_kill hc "$T" || fail "closing an already-closed terminal must be a silent success"
 pass "hc smoke: kill closes and removes the terminal"
+
+# Drive native status changes in the private core without a user shell startup.
+STATE=$TMP_ROOT/event-state
+mkdir -p "$STATE" "$TMP_ROOT/event-work"
+TAG=$(fm_backend_hometag)
+fm_backend_events_capable hc "$SES" || fail "real hc must support the events capability"
+LAB="$ROOT/bin/fm-hc-lab.sh"
+event_shell() {  # <home-label> <task-label>
+  bash "$LAB" run "$SES" run --bg --json --no-parent --no-notify \
+    --cwd "$TMP_ROOT/event-work" --label "firstmate.home=$1" --label "firstmate.task=$2" \
+    /bin/bash --noprofile --norc -i | jq -r .address
+}
+event_status() {  # <address> <status>
+  bash "$LAB" run "$SES" send --json "$1" -- "printf '\\033]7501;state=$2:app=fm-test\\033\\\\'" >/dev/null
+}
+PANE=$(event_shell "$TAG" fm-events) || fail "could not create event shell"
+FOREIGN=$(event_shell other fm-foreign) || fail "could not create foreign shell"
+EVENT_TARGET="$SES:$PANE"
+( fm_backend_wait_transition hc "$SES" 10 "$STATE" "$EVENT_TARGET" > "$TMP_ROOT/event-record"; echo $? > "$TMP_ROOT/event-rc" ) &
+EVENT_PID=$!
+sleep 1
+event_status "$FOREIGN" blocked || fail "could not report foreign blocked status"
+sleep 1
+kill -0 "$EVENT_PID" 2>/dev/null || fail "foreign status ended the event wait"
+event_status "$PANE" blocked || fail "could not report blocked status"
+wait "$EVENT_PID"
+[ "$(cat "$TMP_ROOT/event-rc")" = 0 ] || fail "blocked event did not wake the adapter"
+REC=$(cat "$TMP_ROOT/event-record")
+[ "$(fm_transition_pane_id "$REC")" = "$PANE" ] || fail "event names the wrong terminal"
+[ "$(fm_transition_to_status "$REC")" = blocked ] || fail "event is not blocked"
+fm_backend_commit_transition hc "$STATE" "$SES" "$REC" || fail "could not commit event"
+RC=0
+fm_backend_wait_transition hc "$SES" 1 "$STATE" "$EVENT_TARGET" >/dev/null || RC=$?
+[ "$RC" = 1 ] || fail "a committed blocked event must not repeat"
+( fm_backend_wait_transition hc "$SES" 10 "$STATE" "$EVENT_TARGET" > "$TMP_ROOT/event-record-2"; echo $? > "$TMP_ROOT/event-rc-2" ) &
+EVENT_PID=$!
+sleep 1
+event_status "$PANE" working || fail "could not report working status"
+sleep 1
+event_status "$PANE" blocked || fail "could not report a second blocked status"
+wait "$EVENT_PID"
+[ "$(cat "$TMP_ROOT/event-rc-2")" = 0 ] || fail "working then blocked did not wake again"
+fm_backend_commit_transition hc "$STATE" "$SES" "$(cat "$TMP_ROOT/event-record-2")" || fail "could not commit second event"
+pass "hc smoke: scoped blocked events wake, deduplicate, and wake again after working"
+
+( fm_backend_wait_transition hc "$SES" 10 "$STATE" "$EVENT_TARGET" > /dev/null; echo $? > "$TMP_ROOT/drop-rc" ) &
+EVENT_PID=$!
+sleep 1
+bash "$LAB" stop "$SES" >/dev/null || fail "could not stop the isolated lab core"
+wait "$EVENT_PID"
+[ "$(cat "$TMP_ROOT/drop-rc")" = 2 ] || fail "a dropped stream must fall back to polling"
+bash "$LAB" run "$SES" ls --json >/dev/null || fail "could not reconnect the lab core"
+cat > "$TMP_ROOT/event-work/blocked.sh" <<'SH'
+printf '\033]7501;state=blocked:app=fm-test\033\\'
+read -r -t 30 answer
+SH
+PANE=$(bash "$LAB" run "$SES" run --bg --json --no-parent --no-notify \
+  --cwd "$TMP_ROOT/event-work" --label "firstmate.home=$TAG" --label firstmate.task=fm-snapshot \
+  /bin/bash --noprofile --norc "$TMP_ROOT/event-work/blocked.sh" | jq -r .address) || fail "could not create reconnect fixture"
+snapshot_blocked() { [ "$(bash "$LAB" run "$SES" get --json "$PANE" | jq -r '.status.state // empty')" = blocked ]; }
+wait_for 10 snapshot_blocked || fail "fixture never reported blocked"
+REC=$(fm_backend_wait_transition hc "$SES" 5 "$STATE" "$SES:$PANE") || fail "reconnected snapshot missed blocked state"
+[ "$(fm_transition_pane_id "$REC")" = "$PANE" ] || fail "reconnected snapshot names the wrong terminal"
+[ "$(fm_transition_to_status "$REC")" = blocked ] || fail "reconnected snapshot is not blocked"
+pass "hc smoke: dropped stream falls back and reconnect snapshot finds blocked state"
 echo FM_TEST_COMPLETE

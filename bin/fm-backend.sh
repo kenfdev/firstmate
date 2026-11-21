@@ -1580,7 +1580,7 @@ fm_backend_agent_alive() {  # <backend> <target>
 # fm_backend_has_push: 0 if <backend> exposes a native transition push stream.
 fm_backend_has_push() {  # <backend>
   case "$1" in
-    herdr|rex|t3code) return 0 ;;
+    herdr|hc|rex|t3code) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1596,6 +1596,7 @@ fm_backend_events_capable() {  # <backend> <session>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_events_capable "$@" ;;
+    hc) fm_backend_hc_events_capable "$@" ;;
     rex) fm_backend_rex_events_capable "$@" ;;
     t3code) fm_backend_t3code_events_capable "$@" ;;
     *) return 1 ;;
@@ -1615,6 +1616,7 @@ fm_backend_wait_transition() {  # <backend> <session> <timeout_secs> <state_dir>
   fm_backend_source "$backend" || return 2
   case "$backend" in
     herdr) fm_backend_herdr_wait_transition "$@" ;;
+    hc) fm_backend_hc_wait_transition "$@" ;;
     rex) fm_backend_rex_wait_transition "$@" ;;
     t3code) fm_backend_t3code_wait_transition "$@" ;;
     *) return 2 ;;
@@ -1628,6 +1630,7 @@ fm_backend_commit_transition() {  # <backend> <state_dir> <session> <record>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_commit_transition "$@" ;;
+    hc) fm_backend_hc_commit_transition "$@" ;;
     rex) fm_backend_rex_commit_transition "$@" ;;
     t3code) fm_backend_t3code_commit_transition "$@" ;;
     *) return 1 ;;
@@ -1641,6 +1644,7 @@ fm_backend_clear_transition() {  # <backend> <state_dir> <window>
   fm_backend_source "$backend" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_clear_transition "$@" ;;
+    hc) fm_backend_hc_clear_transition "$@" ;;
     rex) fm_backend_rex_clear_transition "$@" ;;
     t3code) fm_backend_t3code_clear_transition "$@" ;;
     *) return 0 ;;

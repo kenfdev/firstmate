@@ -33,6 +33,16 @@ for a in "$@"; do last=$a; done
 case "$cmd" in
   --version) printf 'hc %s\n' "${FAKE_HC_VERSION:-0.1.14}" ;;
   server) printf '{"live":0}\n' ;;
+  events)
+    if [ "${2:-}" = --help ]; then
+      [ ! -f "$D/no-events" ] || exit 1
+      printf '%s\n' 'events --json --label'
+    else
+      cat "$D/events.jsonl"
+      [ ! -f "$D/drop-events" ] || exit 0
+      sleep 3
+    fi
+    ;;
   connect)
     IFS= read -r _req || true
     printf '{"jsonrpc":"2.0","id":1,"result":{"generation":%s}}\n' "${FAKE_HC_GENERATION:-1}"
@@ -360,8 +370,47 @@ test_required_tool_check_uses_the_adapter_resolver() {
   pass "hc: the bootstrap tool check resolves hc exactly as the adapter does"
 }
 
+test_event_snapshot_dedupe_and_fallback() {
+  local tag rec rc
+  setup_case events
+  tag=$(hometag_of)
+  mkdir -p "$D/state"
+  printf '{"seq":1,"terminals":[{"address":"t1","state":"live","labels":{"firstmate.home":"%s","firstmate.task":"fm-a"},"status":{"state":"blocked","app":"test"}},{"address":"t2","state":"live","labels":{"firstmate.home":"other","firstmate.task":"fm-b"},"status":{"state":"blocked"}}]}\n' "$tag" > "$D/events.jsonl"
+  rec=$(hc_shell 'fm_backend_has_push hc && fm_backend_events_capable hc fmtest && fm_backend_wait_transition hc fmtest 1 "'"$D"'/state" fmtest:t1 fmtest:t2') || fail "snapshot blocked state must wake"
+  assert_equals "$(printf '%s' "$rec" | cut -f1)" t1 "snapshot must stay in the home"
+  assert_equals "$(printf '%s' "$rec" | cut -f4)" blocked "snapshot must report blocked"
+  hc_shell 'fm_backend_commit_transition hc "'"$D"'/state" fmtest "'"$rec"'"' || fail "commit failed"
+  rc=0
+  hc_shell 'fm_backend_wait_transition hc fmtest 1 "'"$D"'/state" fmtest:t1 fmtest:t2' >/dev/null || rc=$?
+  assert_equals "$rc" 1 "an already committed snapshot must wait until the deadline"
+  printf '%s\n' '{"jsonrpc":"2.0","method":"event","params":{"terminal":"t1","type":"status","data":{"status":{"state":"working"}}}}' '{"jsonrpc":"2.0","method":"event","params":{"terminal":"t1","type":"status","data":{"status":{"state":"blocked"}}}}' >> "$D/events.jsonl"
+  rec=$(hc_shell 'fm_backend_wait_transition hc fmtest 1 "'"$D"'/state" fmtest:t1') || fail "working then blocked must wake again"
+  assert_equals "$(printf '%s' "$rec" | cut -f4)" blocked "new blocked edge must return"
+  : > "$D/drop-events"
+  hc_shell 'fm_backend_commit_transition hc "'"$D"'/state" fmtest "'"$rec"'"'
+  printf '{"seq":1,"terminals":[]}\n' > "$D/events.jsonl"
+  rc=0
+  hc_shell 'fm_backend_wait_transition hc fmtest 2 "'"$D"'/state" fmtest:t1' >/dev/null || rc=$?
+  assert_equals "$rc" 2 "an early clean CLI exit must fall back to polling"
+  rm -f "$D/drop-events"
+  printf '%s\n' '{"seq":1,"terminals":[]}' '{"method":"missed","params":{"seq":5,"terminals":[]}}' > "$D/events.jsonl"
+  rc=0
+  hc_shell 'fm_backend_wait_transition hc fmtest 2 "'"$D"'/state" fmtest:t1' >/dev/null || rc=$?
+  assert_equals "$rc" 2 "missed events must fall back to polling"
+  printf '{"seq":1,"terminals":[{"address":"t1","state":"finished","labels":{"firstmate.home":"%s","firstmate.task":"fm-a"},"status":{"state":"blocked"}}]}\n' "$tag" > "$D/events.jsonl"
+  hc_shell 'fm_backend_clear_transition hc "'"$D"'/state" fmtest:t1'
+  rc=0
+  hc_shell 'fm_backend_wait_transition hc fmtest 1 "'"$D"'/state" fmtest:t1' >/dev/null || rc=$?
+  assert_equals "$rc" 1 "a finished terminal must not emit a stale blocked status"
+  FAKE_HC_VERSION=0.1.13 expect_refused hc_shell 'fm_backend_events_capable hc fmtest'
+  : > "$D/no-events"
+  expect_refused hc_shell 'fm_backend_events_capable hc fmtest'
+  pass "hc: filtered snapshots, dedupe, renewed edges, and dropped or unavailable streams"
+}
+
 fm_test_run \
   test_hc_is_spawn_capable_and_needs_app_signals \
+  test_event_snapshot_dedupe_and_fallback \
   test_required_tool_check_uses_the_adapter_resolver \
   test_create_task_is_independent_labeled_and_refuses_duplicates \
   test_control_interrupt_delivers_the_harness_keys \

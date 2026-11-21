@@ -41,7 +41,6 @@
 #   - hc reports one foreground process per terminal (`foreground` in
 #     `hc get`), not a process group; when that process is a launcher,
 #     agent_state also reads the rest of its process group from local `ps`.
-#   - hc has no event push this adapter consumes; supervision polls like tmux.
 #
 # Binary gate: FM_HC_BIN wins, else `herdr-core`, else `hc` (the release
 # asset's name and its CLI alias). `<bin> --version` must report `hc x.y.z`
@@ -54,6 +53,8 @@
 . "$FM_BACKEND_LIB_DIR/fm-composer-lib.sh"
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-agent-process-lib.sh"
+# shellcheck source=bin/fm-transition-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-transition-lib.sh"
 
 # The verified floor: the oldest herdr-core release every adapter surface
 # (including `send --wait` and the `hello` handshake) was exercised against.
@@ -497,4 +498,72 @@ fm_backend_hc_group_has_agent() {  # <pid>
 $(LC_ALL=C ps -A -o pid=,pgid=,comm= 2>/dev/null)
 EOF
   return 1
+}
+
+# The CLI's first events line is an atomic subscription snapshot. The reader
+# projects it and subsequent status events into the shared transition policy.
+fm_backend_hc_events_capable() {  # <session>
+  local help
+  fm_backend_hc_atom_valid "$1" || return 1
+  fm_backend_hc_version_check >/dev/null 2>&1 || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  [ -r "$FM_BACKEND_LIB_DIR/backends/hc-eventwait.py" ] || return 1
+  help=$(fm_backend_hc_cli "$1" events --help 2>/dev/null) || return 1
+  [[ "$help" == *--label* && "$help" == *--json* ]]
+}
+
+fm_backend_hc_commit_transition() {  # <state_dir> <session> <record>
+  fm_transition_commit "$1" .hc-escalated- "$2" "$3"
+}
+
+fm_backend_hc_clear_transition() {  # <state_dir> <window>
+  fm_transition_clear "$1" .hc-escalated- "$2"
+}
+
+fm_backend_hc_wait_transition() {  # <session> <timeout> <state_dir> <window...>
+  local session=$1 timeout=$2 state=$3 bin home w address line record hit rc=1 reader_rc=0
+  shift 3
+  local addresses=()
+  if [ "${FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED:-0}" != 1 ]; then
+    fm_backend_hc_events_capable "$session" || return 2
+  fi
+  fm_backend_hc_atom_valid "$session" || return 2
+  for w in "$@"; do
+    fm_backend_hc_parse_target "$w" || continue
+    [ "$FM_BACKEND_HC_SESSION" = "$session" ] || continue
+    addresses+=("$FM_BACKEND_HC_ADDRESS")
+  done
+  [ "${#addresses[@]}" -gt 0 ] || return 2
+  bin=$(fm_backend_hc_bin) || return 2
+  home=$(fm_backend_hometag) || return 2
+  local fifo_dir fifo reader_pid
+  fifo_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-hc-eventwait.XXXXXX") || return 2
+  fifo="$fifo_dir/events"
+  if ! mkfifo "$fifo"; then rm -rf "$fifo_dir"; return 2; fi
+  python3 "$FM_BACKEND_LIB_DIR/backends/hc-eventwait.py" "$bin" "$session" "${FM_HC_SOCKET:-}" "$timeout" "$home" "${addresses[@]}" > "$fifo" 2>/dev/null &
+  reader_pid=$!
+  if ! exec 9< "$fifo"; then
+    kill "$reader_pid" 2>/dev/null || true
+    wait "$reader_pid" 2>/dev/null || true
+    rm -rf "$fifo_dir"
+    return 2
+  fi
+  if ! IFS= read -r -u 9 line || [ "$line" != @subscribed ]; then rc=2; fi
+  while [ "$rc" -eq 1 ] && IFS= read -r line <&9; do
+    address=$(printf '%s' "$line" | cut -f1)
+    record=$(fm_transition_record "$address" "" "" "$(printf '%s' "$line" | cut -f2)" "$(printf '%s' "$line" | cut -f3)")
+    if hit=$(fm_transition_apply "$state" .hc-escalated- "$session" "$record"); then
+      printf '%s' "$hit"
+      rc=0
+      break
+    fi
+  done
+  [ "$rc" -eq 1 ] || kill "$reader_pid" 2>/dev/null || true
+  wait "$reader_pid" 2>/dev/null || reader_rc=$?
+  exec 9<&-
+  rm -rf "$fifo_dir"
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -eq 2 ] && return 2
+  [ "$reader_rc" -eq 0 ] && return 1
+  return 2
 }
