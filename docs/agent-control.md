@@ -130,6 +130,9 @@ An unreachable endpoint can still hold the live agent a rebind would duplicate, 
 - **hc can prove it for a secondmate.** It rechecks the recorded terminal and requires matching task and home labels when the terminal is present.
   A finished or absent terminal permits `exit` to report `endpoint-gone`; secondmate recovery, not control-plane reclaim, owns its replacement.
   Other hc task kinds do not have a control-plane absence proof.
+- **hc cannot prove a ship or scout endpoint absent.** Its task record names a session and terminal, but not the core socket or state directory.
+  A read can reach a different core and report not found while the original endpoint still runs.
+  Secondmate recovery has its own path, as described in [`docs/hc-backend.md`](hc-backend.md).
 - **tmux cannot.** `list-windows -a` describes only the tmux server the *current process* addresses (its `TMUX_TMPDIR`/socket), and a task record carries no socket identity for its endpoint.
   A different but running server would answer "not anywhere" about a window it was never able to see, so a server-wide read cannot tell a destroyed window from one on a server this process cannot address.
   There is no read available that closes that gap, so tmux always refuses - for a renamed session, a moved window, a foreign socket, and a dead server alike.

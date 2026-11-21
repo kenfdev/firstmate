@@ -3696,6 +3696,23 @@ With a draft typed into the fixture, `inject_msg` deferred before attempting sub
 This fixture verifies hc transport and the daemon function, not a vendor harness or a complete daemon session.
 The current live guard is `tests/fm-backend-hc-smoke.test.sh`.
 
+### Harness prompt status on hc 0.1.21
+
+On 2026-11-21, the following harnesses ran at their prompts in an isolated `fm-hc-lab.sh` session on Linux.
+Each result came from `fm-hc-lab.sh run <session> get --json <terminal>` and an `hc read` of the same terminal.
+The `--if idle` checks used local slash commands, except the omp check, which hc refused before typing.
+
+| Harness | Prompt status | `hc send --if idle` result |
+| --- | --- | --- |
+| Claude Code 2.1.330 | `idle`, app `claude-code` | `/help` opened the local help screen, `started:false`. |
+| Codex 0.169.0 | `idle`, app `codex` | `/status` opened the local status screen through Firstmate's submit path; its screen was classified `unknown`. |
+| Pi 1.4.0 | `idle`, app `pi` | `/help` was accepted with `started:true`; the screen reported it unavailable. |
+| omp 17.3.4 | No reported status | Exit 10, `status_mismatch`; nothing was typed. |
+
+With a manually typed Codex draft, `hc send --if idle` appended and submitted the text despite the idle condition.
+An unrecognized or ambiguous screen cannot establish that a composer is empty.
+The portable regression is `tests/fm-backend-hc.test.sh`.
+
 ### Adapter lifecycle
 
 On 2026-11-21, hc 0.1.21 on Linux ran the secondmate lifecycle in a lab core with token-free harness stand-ins.

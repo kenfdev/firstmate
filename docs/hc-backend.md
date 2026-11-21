@@ -122,6 +122,8 @@ The daemon checks that the supervisor composer is empty before sending marked in
 - Secondmates run in their own home, with their terminal labeled for the launching home so that its control and recovery paths can identify it.
   Control can interrupt, exit, and relaunch an agent in a live terminal.
   A missing terminal follows secondmate recovery; control does not rebind it.
+  Ship and scout relaunch also refuses a missing terminal because the task record does not identify the core socket or its state directory.
+  A different core can answer not found while the recorded agent remains alive on its original core.
 - A worker inherits `HC_SESSION`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`, and `HC_SCOPE` from its terminal, and the `config/launch-env-allowlist` floor keeps them; whether a real harness then reports native status under Firstmate's launch is not verified.
 - Naming a Herdr.app space needs the app window and is not done.
   The `herdr.space`/`herdr.tab` label contract above is the app's documented bridge (its window projects labeled terminals as spaces/tabs and keeps unlabeled ones hidden), verified against a real window: [`verification/runtime-backends.md`](verification/runtime-backends.md#hc) records the live exercise.
