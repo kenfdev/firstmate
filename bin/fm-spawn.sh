@@ -79,16 +79,15 @@
 #   makes a harness switch one ordinary relaunch. It refuses unless the
 #   recorded endpoint is positively agent-free on a backend with both a
 #   recovery-grade agent-state classifier and replacement-agent support
-#   (tmux or herdr), and clears the previous harness's per-task wiring
+#   (tmux, herdr, rex, or hc), and clears the previous harness's per-task wiring
 #   before arming the new incarnation. T3 Code has the classifier but refuses
 #   relaunch because a thread keeps its conversation across turns and provider
 #   changes. Two verdicts are agent-free: a `dead`
 #   endpoint is ADOPTED as-is, while an endpoint PROVEN gone is RE-CREATED in the recorded
 #   worktree and the republished record rebinds the task to it. That proof is
 #   its own step, because a backend's `missing` also covers an endpoint that is
-#   merely unreachable from here - and it is only available on HERDR, which must
-#   still read the recorded pane as gone once that session's server is running
-#   again. A tmux `missing` always refuses: a task record carries no socket
+#   merely unreachable from here. Herdr, Rex, and hc can provide that proof
+#   under their respective identity checks. A tmux `missing` always refuses: a task record carries no socket
 #   identity for its endpoint, so no read here can tell a destroyed window from
 #   one on a tmux server this process cannot address. An endpoint that turns out
 #   to have survived refuses too. The worktree is reused untouched either way; a
@@ -2510,7 +2509,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # endpoint was DESTROYED" with "the endpoint is UNREACHABLE from here right
   # now", and an unreachable endpoint can still hold the live agent this
   # relaunch would duplicate. So absence is PROVEN before it may rebind, never
-  # inferred from a failed read - only HERDR and REX permit task rebind:
+  # inferred from a failed read - Herdr, Rex, and hc can permit task rebind:
   #   herdr - the recorded session's server is started, and the recorded pane is
   #           RE-READ through that session's own socket. `dead` means the pane
   #           survived the restart and is adopted after all; `alive` means the
@@ -2528,8 +2527,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   #           from "on a server I cannot see". A tmux `missing` therefore stays
   #           as deadlocked as it was before this change - deliberately, and
   #           with the reason stated rather than guessed past.
-  #   hc    - proves a secondmate terminal gone, but its separate recovery
-  #           path owns replacement; other task kinds cannot rebind.
+  #   hc    - rechecks the recorded core ID, terminal and agent identity;
+  #           secondmate replacement remains with its separate recovery path.
   # Every transient or self-contradicting read stays `unreadable`/`ambiguous`
   # and refuses as it always did (bin/fm-backend.sh's fm_backend_agent_state
   # owns that vocabulary). The proof itself lives in one place for the whole
@@ -4982,7 +4981,18 @@ if [ "$RELAUNCH" -eq 1 ]; then
     if [ "$BACKEND" = hc ]; then
       HC_SES=${T%%:*}
       HC_TERMINAL=${T#*:}
+      HC_CORE=$(fm_backend_hc_core_id "$HC_SES" 2>/dev/null || true)
     fi
+  elif [ "$BACKEND" = hc ]; then
+    HC_SES=${RELAUNCH_TARGET%%:*}
+    HC_CORE=$(fm_backend_hc_core_id "$HC_SES") || exit 1
+    if [ "$HC_CORE" != "$(fm_meta_get "$RELAUNCH_META" hc_core)" ]; then
+      echo "error: hc core changed before reclaiming $ID; refusing to launch" >&2
+      exit 1
+    fi
+    HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$WT" "$KIND") || exit 1
+    T="$HC_SES:$HC_TERMINAL"
+    WT_TARGET=$T
   elif [ "$BACKEND" = rex ]; then
     # The recorded endpoint is authoritatively gone, so there is nothing to
     # adopt: create ONE fresh endpoint for the same task, opened directly in the
@@ -5377,6 +5387,7 @@ EOF
     ;;
   hc)
     HC_SES=$(fm_backend_hc_container_ensure) || exit 1
+    HC_CORE=$(fm_backend_hc_core_id "$HC_SES" 2>/dev/null || true)
     HC_TERMINAL=$(fm_backend_hc_create_task "$HC_SES" "$W" "$PROJ_ABS" "$KIND") || exit 1
     T="$HC_SES:$HC_TERMINAL"
     ;;
@@ -7328,7 +7339,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal hc_core hc_agent_pid hc_agent_start home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7426,6 +7437,7 @@ preserve_relaunch_meta() {
   if [ "$BACKEND" = hc ]; then
     echo "hc_session=$HC_SES"
     echo "hc_terminal=$HC_TERMINAL"
+    echo "hc_core=${HC_CORE:-}"
   fi
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
@@ -8242,6 +8254,27 @@ if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
+fi
+if [ "$BACKEND" = hc ] && [ "$KIND" != secondmate ]; then
+  HC_AGENT_IDENTITY=
+  for ((HC_ID_POLL=0; HC_ID_POLL<20; HC_ID_POLL++)); do
+    HC_AGENT_IDENTITY=$(fm_backend_hc_agent_identity "$T" 2>/dev/null || true)
+    [ -z "$HC_AGENT_IDENTITY" ] || break
+    sleep 0.1
+  done
+  if [ -n "$HC_AGENT_IDENTITY" ] && [ "${HC_CORE:-}" = "$(fm_backend_hc_core_id "$HC_SES" 2>/dev/null || true)" ]; then
+    IFS=$'\t' read -r HC_AGENT_PID HC_AGENT_START <<EOF
+$HC_AGENT_IDENTITY
+EOF
+    SPAWN_META_TMP="$STATE/.$ID.meta.hc-identity.${BASHPID:-$$}"
+    if ! spawn_meta_rewrite_before_pr "$STATE/$ID.meta" "$SPAWN_META_TMP" "hc_agent_pid hc_agent_start" \
+      "hc_agent_pid=$HC_AGENT_PID" "hc_agent_start=$HC_AGENT_START" ||
+      ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
+      echo "warning: could not record hc agent identity for $ID; missing-endpoint reclaim will refuse" >&2
+      rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+    fi
+    SPAWN_META_TMP=
+  fi
 fi
 SPAWN_DEFERRED_SIGNAL=
 if [ "$BACKLOG_TRANSITION" = 1 ]; then

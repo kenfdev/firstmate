@@ -45,7 +45,7 @@ case "$cmd" in
     ;;
   connect)
     IFS= read -r _req || true
-    printf '{"jsonrpc":"2.0","id":1,"result":{"generation":%s}}\n' "${FAKE_HC_GENERATION:-1}"
+    printf '{"jsonrpc":"2.0","id":1,"result":{"generation":%s,"core":{"id":"%s"}}}\n' "${FAKE_HC_GENERATION:-1}" "${FAKE_HC_CORE:-core1}"
     ;;
   ls) cat "$D/ls.json" 2>/dev/null || printf '{"terminals":[]}\n' ;;
   run) cat "$D/run.json" ;;
@@ -201,6 +201,55 @@ test_control_interrupt_delivers_the_harness_keys() {
   expect_code 0 "$rc" "interrupt on an hc task should succeed"$'\n'"$out"
   assert_contains "$(grep $'\x1fkeys\x1f' "$D/log")" $'keys\x1f--json\x1ft2\x1f--\x1fesc' "interrupt must press Escape on the recorded terminal"
   pass "hc: fm-control interrupt delivers the harness's interrupt key"
+}
+
+test_control_rechecks_hc_core_and_agent_identity() {
+  local out id=hcproof start rc
+  setup_case proof
+  mkdir -p "$HOMEDIR/state" "$HOMEDIR/data"
+  start=$(LC_ALL=C ps -p "$$" -o lstart= | awk '{$1=$1; print}')
+  cat > "$HOMEDIR/state/$id.meta" <<EOF
+window=fmtest:t9
+endpoint_task_id=$id
+worktree=$D
+project=$D
+harness=codex
+kind=scout
+backend=hc
+hc_session=fmtest
+hc_terminal=t9
+hc_core=core1
+hc_agent_pid=$$
+hc_agent_start=$start
+EOF
+  rc=0
+  out=$(FAKE_HC_DIR="$D" PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FM_HOME="$HOMEDIR" FM_ROOT_OVERRIDE="$HOMEDIR" \
+    "$FM_TEST_ROOT/bin/fm-control.sh" "$id" exit 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a live recorded agent must refuse"
+  assert_contains "$out" 'still alive' "the refusal must name the live agent"
+  write_terminal "$D" t9 live "fm-$id" "$(hometag_of)" bash bash
+  out=$(hc_shell '. "'"$FM_TEST_ROOT"'/bin/fm-control-lib.sh"; fm_control_endpoint_absence_verdict hc fmtest:t9 "'"$HOMEDIR"'/state/'"$id"'.meta"')
+  assert_contains "$out" 'still alive' "a reappeared shell must not hide the recorded live agent"
+  rm -f "$D/t9.json"
+  sed -i.bak 's/^hc_core=.*/hc_core=other/' "$HOMEDIR/state/$id.meta"
+  rc=0
+  out=$(FAKE_HC_DIR="$D" PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FM_HOME="$HOMEDIR" FM_ROOT_OVERRIDE="$HOMEDIR" \
+    "$FM_TEST_ROOT/bin/fm-control.sh" "$id" exit 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a different core must refuse"
+  assert_contains "$out" 'core identity differs' "the refusal must name the wrong core"
+  sed -i.bak -e 's/^hc_core=.*/hc_core=core1/' -e 's/^hc_agent_pid=.*/hc_agent_pid=99999999/' "$HOMEDIR/state/$id.meta"
+  out=$(FAKE_HC_DIR="$D" PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FM_HOME="$HOMEDIR" FM_ROOT_OVERRIDE="$HOMEDIR" \
+    "$FM_TEST_ROOT/bin/fm-control.sh" "$id" exit 2>&1) || fail "missing endpoint and exited agent should be accepted: $out"
+  assert_contains "$out" endpoint-gone "exit should report the absent endpoint"
+  printf '#!/bin/sh\nexit 0\n' > "$FB/ps"
+  chmod +x "$FB/ps"
+  expect_refused env FAKE_HC_DIR="$D" PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FM_HOME="$HOMEDIR" FM_ROOT_OVERRIDE="$HOMEDIR" \
+    "$FM_TEST_ROOT/bin/fm-control.sh" "$id" exit
+  rm -f "$FB/ps"
+  sed -i.bak '/^hc_core=/d' "$HOMEDIR/state/$id.meta"
+  expect_refused env FAKE_HC_DIR="$D" PATH="$FB:$PATH" FM_HC_BIN="$FB/hc" FM_HOME="$HOMEDIR" FM_ROOT_OVERRIDE="$HOMEDIR" \
+    "$FM_TEST_ROOT/bin/fm-control.sh" "$id" exit
+  pass "hc: exit requires the recorded core and an exited agent"
 }
 
 test_control_exit_accepts_a_proven_dead_secondmate() {
@@ -556,6 +605,7 @@ fm_test_run \
   test_create_task_is_independent_labeled_and_refuses_duplicates \
   test_presentation_settings_and_group_rules \
   test_control_interrupt_delivers_the_harness_keys \
+  test_control_rechecks_hc_core_and_agent_identity \
   test_control_exit_accepts_a_proven_dead_secondmate \
   test_foreign_or_unlabeled_terminal_gets_no_input_and_no_close \
   test_invalid_session_never_reaches_hc \

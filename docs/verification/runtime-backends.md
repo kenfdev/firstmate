@@ -3685,6 +3685,11 @@ The default socket path under the scratchpad temp directory exceeded the 103-byt
 | `server stop` on a lab session (0.1.14, 2026-10-30) | Closes the API listener only; the session's `serve` and `hold` daemons stay by design and take ~30-60s to finish exiting after TERM/KILL. `bin/fm-hc-lab.sh` sweeps them by their exact `HC_SESSION=<name>` env token. |
 | `hc get` of a terminal running the user's `claude` wrapper | `foreground` was `{"name":"hats","argv":["/Users/fran/.cargo/bin/hats","run","--"]}`; the Claude process was another member of that process group. |
 
+On 2026-11-21, hc 0.1.21 on Linux ran `env PATH=/usr/bin:/bin SHELL=/bin/sh FM_HC_BIN=/home/kfukuyama/.local/bin/herdr-core bash tests/fm-backend-hc-smoke.test.sh` in a fresh guarded lab.
+The suite printed `ok - hc smoke: missing ship reclaims one terminal in the same worktree and refuses a different core` and `FM_TEST_COMPLETE`, then completed guarded teardown.
+The fixture also checked that its uncommitted file survived and that the replacement record carried the core and agent process identities.
+It used a token-free harness stand-in; it does not establish how every real harness presents its foreground process.
+
 On 2026-11-21, hc 0.1.21 in a private `fm-hc-lab.sh` session received `keys --json t2 -- d r a f t` followed by `send --json t2 -- INJECTED` into a Python line reader with no reported agent status.
 The screen showed `RECEIVED='draftINJECTED\n'`: the send submitted the existing draft together with the new text.
 With a second draft in the same lab terminal, `hc send --if idle` returned status mismatch without typing because that terminal reported no agent status.

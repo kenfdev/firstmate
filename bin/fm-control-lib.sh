@@ -453,9 +453,9 @@ fm_control_absence_recheck_applies() {  # <backend> <raw-state>
 #     on the verified server, while an unreachable server reads `unreadable`.
 #     The proof re-reads the thread, but exit and relaunch refuse before it:
 #     V2 has no session stop and a thread cannot host a replacement.
-#   hc rechecks a secondmate's recorded terminal and its home/task labels.
-#     An absent or finished terminal is gone; its replacement belongs to the
-#     secondmate recovery path. Other task kinds cannot rebind through hc.
+#   hc rechecks a secondmate's terminal and labels; its replacement belongs to
+#     secondmate recovery. A ship or scout must also match its recorded core
+#     and show that its recorded agent process is no longer alive.
 #   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
 #     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
 #     carry the endpoint's socket identity - so a different but running server
@@ -505,13 +505,44 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target> [meta]
       esac
       ;;
     hc)
+      if [ "$(fm_meta_get "$meta" kind)" != secondmate ]; then
+        local hc_id hc_pid hc_start hc_now hc_state
+        hc_id=$(fm_meta_get "$meta" hc_core)
+        hc_pid=$(fm_meta_get "$meta" hc_agent_pid)
+        hc_start=$(fm_meta_get "$meta" hc_agent_start)
+        [ -n "$hc_id" ] && [ -n "$hc_pid" ] && [ -n "$hc_start" ] || {
+          printf 'unproven\thc core or agent process identity was not recorded'; return 0;
+        }
+        fm_backend_hc_parse_target "$target" || { printf 'unproven\thc target is invalid'; return 0; }
+        hc_now=$(fm_backend_hc_core_id "$FM_BACKEND_HC_SESSION") || {
+          printf 'unproven\thc core identity could not be read'; return 0;
+        }
+        [ "$hc_now" = "$hc_id" ] || { printf 'unproven\thc core identity differs from the recorded core'; return 0; }
+        hc_state=$(fm_backend_hc_endpoint_state "$target" "fm-$(fm_meta_get "$meta" endpoint_task_id)")
+        case "$hc_state" in
+          absent|finished) hc_state=gone ;;
+          ready)
+            case "$(fm_backend_hc_agent_state "$target")" in
+              dead) hc_state=dead ;;
+              alive) printf 'alive\t'; return 0 ;;
+              *) printf 'unproven\thc terminal could not be classified'; return 0 ;;
+            esac
+            ;;
+          *) printf 'unproven\thc terminal is foreign or unreadable'; return 0 ;;
+        esac
+        fm_backend_hc_agent_identity_gone "$hc_pid" "$hc_start" || {
+          printf 'unproven\tthe recorded hc agent is still alive or its process state cannot be read'; return 0;
+        }
+        hc_now=$(fm_backend_hc_core_id "$FM_BACKEND_HC_SESSION") || {
+          printf 'unproven\thc core identity could not be rechecked'; return 0;
+        }
+        [ "$hc_now" = "$hc_id" ] || { printf 'unproven\thc core changed during the recheck'; return 0; }
+        printf '%s\t' "$hc_state"
+        return 0
+      fi
       # Secondmate recovery owns replacement of a finished or absent terminal.
       # Recheck its task and home labels before treating a retained finished
       # terminal as gone; a foreign or unreadable endpoint proves nothing.
-      if [ "$(fm_meta_get "$meta" kind)" != secondmate ]; then
-        printf 'unproven\thc endpoint rebind is not verified for this task kind'
-        return 0
-      fi
       local id
       id=$(fm_meta_get "$meta" endpoint_task_id)
       [ -n "$id" ] || { printf 'unproven\thc task binding is missing'; return 0; }

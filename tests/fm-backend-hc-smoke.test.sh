@@ -389,6 +389,70 @@ C
   assert_equals "$(fm_backend_hc_endpoint_state "$OLD_TARGET")" absent "dead-shell recovery removed the old terminal"
   pass "hc smoke: secondmate spawn, control, relaunch and recovery"
 
+  SHIP_HOME="$TMP_ROOT/ship-home"
+  SHIP_PROJECT="$TMP_ROOT/ship-project"
+  SHIP_WORKTREE="$TMP_ROOT/ship-worktree"
+  mkdir -p "$SHIP_HOME/state" "$SHIP_HOME/data/hcproof" "$SHIP_HOME/config"
+  fm_git_init_commit "$SHIP_PROJECT"
+  git clone -q "$SHIP_PROJECT" "$SHIP_WORKTREE" || fail "could not clone fixture project"
+  git -C "$SHIP_WORKTREE" checkout -qb fm/hcproof || fail "could not create fixture branch"
+  printf 'uncommitted fixture\n' > "$SHIP_WORKTREE/uncommitted"
+  printf '# Task\n\n## Captain\047s intent\nKeep the fixture.\n\n## Firstmate spec\nKeep the worktree.\n' > "$SHIP_HOME/data/hcproof/brief.md"
+  export FM_HOME="$SHIP_HOME"
+  SHIP_ADDR=$(fm_backend_hc_create_task "$SES" fm-hcproof "$SHIP_WORKTREE" ship) || fail "could not create ship fixture"
+  SHIP_TARGET="$SES:$SHIP_ADDR"
+  fm_backend_hc_send_text_line "$SHIP_TARGET" "exec codex" fm-hcproof || fail "could not start ship fixture agent"
+  ship_identity_ready() { SHIP_IDENTITY=$(fm_backend_hc_agent_identity "$SHIP_TARGET" 2>/dev/null); [ -n "$SHIP_IDENTITY" ]; }
+  wait_for 20 ship_identity_ready || fail "could not identify ship fixture agent"
+  IFS=$'\t' read -r SHIP_PID SHIP_START <<EOF
+$SHIP_IDENTITY
+EOF
+  SHIP_CORE=$(fm_backend_hc_core_id "$SES") || fail "could not identify the lab core"
+  cat > "$SHIP_HOME/state/hcproof.meta" <<EOF
+window=$SHIP_TARGET
+endpoint_task_id=hcproof
+worktree=$SHIP_WORKTREE
+project=$SHIP_PROJECT
+harness=codex
+kind=ship
+mode=local-only
+yolo=off
+branch=fm/hcproof
+backend=hc
+hc_session=$SES
+hc_terminal=$SHIP_ADDR
+hc_core=$SHIP_CORE
+hc_agent_pid=$SHIP_PID
+hc_agent_start=$SHIP_START
+EOF
+  "$ROOT/bin/fm-hc-lab.sh" run "$SES" kill --json "$SHIP_ADDR" >/dev/null || fail "could not kill ship terminal"
+  sed -i.bak 's/^hc_core=.*/hc_core=wrong-core/' "$SHIP_HOME/state/hcproof.meta"
+  if "$ROOT/bin/fm-control.sh" hcproof exit > "$TMP_ROOT/wrong-core.out" 2>&1; then
+    fail "a different core must refuse exit"
+  fi
+  grep -q 'core identity differs' "$TMP_ROOT/wrong-core.out" || fail "wrong-core refusal was not explained"
+  if "$ROOT/bin/fm-control.sh" hcproof relaunch --note "wrong core" > "$TMP_ROOT/wrong-core-relaunch.out" 2>&1; then
+    fail "a different core must refuse relaunch"
+  fi
+  grep -q 'core identity differs' "$TMP_ROOT/wrong-core-relaunch.out" || fail "wrong-core relaunch refusal was not explained"
+  sed -i.bak "s/^hc_core=.*/hc_core=$SHIP_CORE/" "$SHIP_HOME/state/hcproof.meta"
+  "$ROOT/bin/fm-control.sh" hcproof exit > "$TMP_ROOT/ship-exit.out" || fail "ship exit did not prove absence"
+  "$ROOT/bin/fm-control.sh" hcproof relaunch --note "resume fixture" > "$TMP_ROOT/ship-relaunch.out" 2>&1 || {
+    cat "$TMP_ROOT/ship-relaunch.out"
+    fail "ship reclaim failed"
+  }
+  SHIP_NEW_TARGET=$(fm_backend_target_of_meta "$SHIP_HOME/state/hcproof.meta")
+  [ "$SHIP_NEW_TARGET" != "$SHIP_TARGET" ] || fail "reclaim did not replace the endpoint"
+  [ "$(fm_meta_get "$SHIP_HOME/state/hcproof.meta" hc_core)" = "$SHIP_CORE" ] || fail "relaunch did not record the core identity"
+  [ -n "$(fm_meta_get "$SHIP_HOME/state/hcproof.meta" hc_agent_pid)" ] || fail "relaunch did not record the replacement agent PID"
+  [ -n "$(fm_meta_get "$SHIP_HOME/state/hcproof.meta" hc_agent_start)" ] || fail "relaunch did not record the replacement agent start time"
+  [ "$(fm_meta_get "$SHIP_HOME/state/hcproof.meta" worktree)" = "$SHIP_WORKTREE" ] || fail "reclaim changed the worktree"
+  [ "$(cat "$SHIP_WORKTREE/uncommitted")" = 'uncommitted fixture' ] || fail "reclaim changed uncommitted work"
+  SHIP_COUNT=$("$ROOT/bin/fm-hc-lab.sh" run "$SES" ls --json --label firstmate.task=fm-hcproof --label "firstmate.home=$(fm_backend_hometag)" | jq '.terminals | length')
+  [ "$SHIP_COUNT" = 1 ] || fail "reclaim did not leave exactly one live fixture terminal"
+  pass "hc smoke: missing ship reclaims one terminal in the same worktree and refuses a different core"
+
+  export FM_HOME="$MATE_PARENT"
   CLAUDE_HOME="$TMP_ROOT/claude-home"
   mkdir -p "$CLAUDE_HOME/bin" "$CLAUDE_HOME/data" "$CLAUDE_HOME/state" "$TMP_ROOT/claude-config"
   printf 'hooks\n' > "$CLAUDE_HOME/.fm-secondmate-home"

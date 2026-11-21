@@ -248,6 +248,43 @@ fm_backend_hc_hello() {  # <session>
   printf '%s' "$gen"
 }
 
+# A core ID comes from the same handshake as the protocol gate.
+fm_backend_hc_core_id() {  # <session>
+  local out id
+  out=$(printf '{"jsonrpc":"2.0","method":"hello","params":{"generation":%s},"id":1}\n' \
+    "$FM_BACKEND_HC_GENERATION" | fm_backend_hc_env_run "$1" connect --session "$1" 2>/dev/null) || return 1
+  id=$(printf '%s' "$out" | jq -er 'select(.result.generation == 1) | .result.core.id | select(type == "string" and test("^[A-Za-z0-9_-]+$"))' 2>/dev/null) || return 1
+  printf '%s' "$id"
+}
+
+# Capture only a foreground process positively classified as an agent.
+fm_backend_hc_agent_identity() {  # <target>
+  local json fields pid name argv args start
+  json=$(fm_backend_hc_get "$1") || return 1
+  fields=$(printf '%s' "$json" | jq -er 'select(.state == "live" and .foreground != null) |
+    [(.foreground.pid | tostring), .foreground.name, (.foreground.argv[0] // ""), ((.foreground.argv // []) | join(" "))] | @tsv') || return 1
+  IFS=$'\t' read -r pid name argv args <<EOF
+$fields
+EOF
+  case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  [ "$(fm_agent_process_classify "$name" "$argv" "$args" "$pid")" = agent ] || return 1
+  start=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  start=$(printf '%s' "$start" | awk '{$1=$1; print}')
+  [ -n "$start" ] || return 1
+  printf '%s\t%s' "$pid" "$start"
+}
+
+# A successful complete process listing is needed even when the PID is absent.
+fm_backend_hc_agent_identity_gone() {  # <pid> <start>
+  local pid=$1 start=$2 list current
+  case "$pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  [ -n "$start" ] || return 1
+  list=$(LC_ALL=C ps -A -o pid=,lstart= 2>/dev/null) || return 1
+  printf '%s\n' "$list" | awk -v pid="$$" '$1 == pid && NF == 6 {found=1} END {exit !found}' || return 1
+  current=$(printf '%s\n' "$list" | awk -v pid="$pid" '$1 == pid {if (NF != 6) exit 1; $1=""; sub(/^ +/, ""); $1=$1; print}') || return 1
+  [ "$current" != "$start" ]
+}
+
 # fm_backend_hc_container_ensure: prove the binary is herdr-core at the
 # verified floor, make sure the session's core answers (hc starts its own
 # core on first use) and speaks protocol generation 1, then print the
